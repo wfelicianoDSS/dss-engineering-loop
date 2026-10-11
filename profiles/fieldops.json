@@ -1,0 +1,152 @@
+// FieldOps profile for the DSS Engineering Loop.
+//
+// This is a super-board config (see skills/super-board/references/config-schema.json)
+// with the FieldOps policy decisions filled in. Strip the `//` comments before
+// validating as JSON; copy to .claude/super-board/configs/fieldops.json in the
+// fieldops repo to activate.
+//
+// WHY THIS FILE EXISTS RATHER THAN EDITS TO UPSTREAM
+// Everything DSS-specific lives in new files (profiles/, references/dss-*.md,
+// skills/dss-*). Upstream's scripts/, workflows/ and skills/super-* are left
+// untouched so `git merge upstream/main` stays clean. Upstream is actively
+// developed — it committed the day this fork was taken.
+
+{
+  "version": 1,
+  "description": "FieldOps — multi-tenant field-service platform (EPIC-007 GPS/Evidence active)",
+
+  "project": {
+    "owner": "wfelicianoDSS",
+    // FILL IN: `gh project list --owner wfelicianoDSS` — titles are not unique,
+    // the CLI needs the number.
+    "title": "FieldOps",
+    "number": 0
+  },
+
+  "worker_backend": "workflow",
+
+  // FieldOps stories are security-sensitive and the review lanes do real work.
+  // medium = sonnet/opus/session-model by card complexity.
+  "model_tier": "medium",
+
+  // Codex is the usage-fallback agent. Per scripts/super-board-codex-lane.sh a
+  // fallback lane may build and QA but NEVER owns Review or merge (exit 78).
+  // That constraint is exactly right for FieldOps: authority stays with the
+  // primary agent and William, execution is portable.
+  "codex": { "model": null },
+
+  "target": { "type": "repo", "url": null },
+
+  "repo": {
+    "path": ".",
+    "remote": "https://github.com/wfelicianoDSS/fieldops"
+  },
+
+  // Per the FieldOps workflow (.codex/skills/fieldops-story-workflow), story PRs
+  // target main. Saved memory says feature PRs target staging for other DSS
+  // repos — fieldops is the exception, confirmed by US-094/US-095 landing on main.
+  "base_branch": "main",
+
+  "timezone": "America/Puerto_Rico",
+
+  "columns": ["Backlog", "Ready", "Building", "QA", "Review", "Blocked", "Done"],
+  "labels": ["qa", "bug", "feature"],
+
+  "paths": {
+    "project_md": null,
+    "pre_flight_md": "docs/super-board/pre-flight.md",
+    "runs_dir": "docs/super-board/runs"
+  },
+
+  // Keep false and let merge_policy decide per PR. `true` would stop every
+  // Reviewer before the gate, which throws away the auto path for LOW/MEDIUM
+  // work and puts William back in the loop for documentation changes.
+  "human_approves_merge": false,
+
+  // THE RISK ROUTER. always_human categories implement the CRITICAL tier of the
+  // DSS risk model (references/dss-risk-model.md): any PR touching them exits
+  // the gate 7, lands in Blocked 🙋 and waits for William. Keyword matches are
+  // searched in the diff's ADDED lines only.
+  //
+  // Setting this key REPLACES upstream's whole default set, so the categories
+  // below re-state the ones FieldOps still wants (money, auth) with
+  // FieldOps-specific paths, and add the tenant/lifecycle/migration categories
+  // the FieldOps security invariants demand.
+  "merge_policy": {
+    "default": "auto",
+
+    // FieldOps vertical slices are small by design (US-095 was ~1000 lines
+    // including tests, which would correctly stop for a human read).
+    "auto_max_lines": 400,
+
+    "size_exclude": [
+      "**/package-lock.json", "**/bun.lock", "**/yarn.lock", "**/pnpm-lock.yaml",
+      "**/*.Designer.cs",
+      "**/generated/**", "**/__generated__/**", "**/*.generated.*",
+      "**/__snapshots__/**", "**/*.snap",
+      "**/*.min.js", "**/*.map"
+    ],
+
+    "always_human": {
+      // Tenant isolation is THE FieldOps invariant. Any change to the trusted
+      // tenant source, the organization context, or a module's persistence
+      // boundary is reviewed by a human, every time.
+      "tenant": {
+        "labels": ["tenant", "multi-tenancy", "security"],
+        "paths": [
+          "**/Organizations/**",
+          "**/Authorization/**",
+          "**/Authentication/**",
+          "**/Persistence/**DbContext*.cs",
+          "**/*Lock.cs"
+        ],
+        "keywords": [
+          "ICurrentOrganization", "OrganizationId", "IOrganizationOwned",
+          "HasQueryFilter", "IgnoreQueryFilters", "FromSqlInterpolated", "FromSqlRaw"
+        ]
+      },
+
+      // Permissions and role grants decide who can do what across every tenant.
+      "authz": {
+        "labels": ["auth", "permissions", "security"],
+        "paths": [
+          "**/OrganizationPermissions.cs",
+          "**/SystemRolePermissions.cs",
+          "**/SystemRoles.cs",
+          "**/PermissionPolicies.cs"
+        ],
+        "keywords": ["RequireAuthorization", "permission:", "AllowAnonymous"]
+      },
+
+      // A migration is hard to reverse once it runs against real data.
+      "migrations": {
+        "labels": ["migration", "schema"],
+        "paths": ["**/Migrations/**"],
+        "keywords": ["DropColumn", "DropTable", "DropIndex", "DropForeignKey", "AlterColumn"]
+      },
+
+      // Lifecycle transitions encode the domain's irreversible steps.
+      "lifecycle": {
+        "labels": ["lifecycle"],
+        "paths": ["**/*LifecycleState.cs"],
+        "keywords": ["EnsureNotCompleted", "LifecycleState ="]
+      },
+
+      // Not yet reached in FieldOps, kept so the category exists before the
+      // first billing story rather than after it.
+      "money": {
+        "labels": ["money", "payments", "billing", "pricing"],
+        "paths": ["**/billing/**", "**/payments/**", "**/stripe/**", "**/Invoicing/**"],
+        "keywords": ["stripe.", "payment_intent", "price_id", "invoice.create"]
+      },
+
+      // Evidence and GPS are customer-visible records of work performed, and
+      // the object store holds presigned bearer credentials.
+      "evidence": {
+        "labels": ["evidence", "gps"],
+        "paths": ["**/Storage/**", "**/*EvidenceObjectStore*.cs"],
+        "keywords": ["CreateUploadTargetAsync", "presign", "uploadUrl", "StorageKey"]
+      }
+    }
+  }
+}
