@@ -506,6 +506,16 @@ Builder's reasoning.
    (QA → Ready) with the list (witness, expected, rung, target file). Medium and Low go
    in the handoff under `Test gaps (not written)` and never block.
 
+## Project-local verification skill (`verify-<app>`)
+
+Tests prove the code; a verification skill proves the **app** behaves when driven the way a
+user drives it. When `.claude/skills/verify-<app>/` exists, the Tester drives the affected
+feature through it and captures the evidence for the card. When it does not and the card is
+UI-affecting, the Tester creates it once — launch / doctor / drive / evidence / cleanup plus
+a feature map — following
+[`references/verification-skill.md`](references/verification-skill.md). One per project,
+maintained as the app changes; never weaken a journey to make it pass.
+
 ## Skill dependencies
 
 The worker (per `references/iteration-preamble.md`) must load and follow:
