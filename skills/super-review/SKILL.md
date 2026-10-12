@@ -443,6 +443,10 @@ before calling a PR merge-ready. The shared principles every lane reads are in
 [`../super-board/references/principles.md`](../super-board/references/principles.md), and
 the standing bar a card must clear is
 [`../super-board/references/definition-of-done.md`](../super-board/references/definition-of-done.md).
+Check the author's **blast-radius** claim against the code
+([`../super-board/references/blast-radius.md`](../super-board/references/blast-radius.md)),
+and treat any weakened or skipped check as a finding, per the repo's
+[`../super-board/references/constraints.md`](../super-board/references/constraints.md).
 
 ### Block/Skip exits use the §4 mandatory template
 Same rule as super-build/super-qa.

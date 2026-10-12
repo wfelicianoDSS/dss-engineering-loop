@@ -196,6 +196,12 @@ the real artifact, never a self-report. Mechanics and test sizing are in
 [`references/tdd.md`](references/tdd.md); the shared engineering principles every lane
 reads first are in [`../super-board/references/principles.md`](../super-board/references/principles.md).
 
+Before building, name the change's **blast radius** — callers, shared files, invariants —
+per [`../super-board/references/blast-radius.md`](../super-board/references/blast-radius.md),
+and honour the repo's standing bar in
+[`../super-board/references/constraints.md`](../super-board/references/constraints.md)
+(`CONSTRAINTS.md`). Never weaken or skip a check to get green.
+
 ## Recovery / re-entry
 
 If the user invokes `/super-build` after a partial run:
