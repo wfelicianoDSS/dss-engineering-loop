@@ -137,26 +137,69 @@ Repeat until a done condition or halt gate fires:
    **Usage guard** (Claude waves only; skip for `--codex`, explicit or host-switched) — `bash .claude/bin/super-board-usage.sh check --config <config-path>`
    (Claude 5-hour and weekly plan usage; threshold `usage_pause_pct`, default 95):
    - exit 0 → launch.
-   - exit 10 with `usage_fallback: "codex"` → Build/QA may use
-     `super-board-codex-lane.sh` WITHOUT `--codex`; Review remains refused.
-     Fallback never grants merge ownership; use explicit `run --codex` for all lanes.
-     Plan as usual, take the `build` and `qa` cards (`review` cards wait), and for ONE
-     card at a time claim it, run `bash .claude/bin/super-board-codex-lane.sh --config
-     <config-path> --card '<card JSON>' --lane <build|qa>`, read its JSON exit like a lane
-     result, then reconcile (step 5). Re-run the usage check between cards; on exit 0
-     return to normal waves. The report line says `🔁 codex fallback`. Without
-     `usage_fallback: "codex"` the launcher refuses (exit 78) unless `--codex` is given.
-   - exit 10 otherwise (pause) → launch nothing new. A wave already running finishes —
-     stopping it mid-lane loses work. Then release claims as usual, post the
-     resume note (one line to the user and the run manifest:
-     `⏸ paused at <window> <used>% — resets <local time>; remaining: <N> cards; resume: /super-board run <slug>`),
-     remove the wave lock, and wait for the reset. If a wake tool is available
-     (`ScheduleWakeup`, or a `/loop` re-entry), schedule
-     `min(3600, resets_at - now + 60)` seconds and chain until the reset; on
-     wake re-run the check — trust the reading, not the clock — and continue
-     only on exit 0. No wake tool → stop with the note; the user resumes.
-   - exit 3 (unknown) → launch, and say once per run why the guard is blind
-     (its `reason`). Do not halt a run on a missing signal.
+   - exit 10 with `usage_fallback` naming `"codex"` (a bare string, or first in
+     an array) → Build/QA may use `super-board-codex-lane.sh` WITHOUT `--codex`;
+     Review remains refused. Fallback never grants merge ownership; use explicit
+     `run --codex` for all lanes. Plan as usual, take the `build` and `qa` cards
+     (`review` cards wait), and for ONE card at a time claim it, run `bash
+     .claude/bin/super-board-codex-lane.sh --config <config-path> --card '<card
+     JSON>' --lane <build|qa>`, read its JSON exit like a lane result, then
+     reconcile (step 5). Re-run the usage check between cards; on exit 0 return
+     to normal waves. The report line says `🔁 codex fallback`. Without
+     `usage_fallback` naming `"codex"` the launcher refuses (exit 78) unless
+     `--codex` is given. Codex has no quota guard of its own — once chosen it
+     is treated as always available.
+   - Codex unavailable (its process fails to start, e.g. the CLI isn't
+     installed) with `"openrouter"` also in `usage_fallback` → fall through to
+     the OpenRouter leg below in the same wave, same card.
+   - `usage_fallback` includes `"openrouter"` (after Codex, or alone if
+     `"codex"` isn't listed) → `bash .claude/bin/super-board-openrouter-balance.sh
+     check --config <config-path>` (reads `openrouter.floor_credits`, default
+     1; needs `OPENROUTER_MANAGEMENT_KEY` — a Management key, NOT the
+     inference key, since OpenRouter's `/credits` rejects a normal key with
+     403 — resolve env vars the way `super-board-env-check.sh` does, never
+     read `.env` directly):
+     - exit 0 (`ok`) → Build/QA only, same one-card-at-a-time claim pattern,
+       `bash .claude/bin/super-board-openrouter-lane.sh --config <config-path>
+       --card '<card JSON>' --lane <build|qa>` (uses `OPENROUTER_API_KEY` for
+       the actual chat completion — a different key from the balance check).
+       Report line `🔁 openrouter fallback`.
+     - exit 10 (`pause`) or exit 3 (`unknown`, no key / API unreachable) → if
+       `"deepseek"` is also in `usage_fallback`, fall through to the DeepSeek
+       leg below in the same wave, same card; otherwise treat as the plain
+       pause below.
+     Re-run the balance check between cards; a rising balance (user topped up)
+     moves it back to `ok` without restarting the run. Without `"openrouter"`
+     in `usage_fallback` this leg is never attempted.
+   - `usage_fallback` includes `"deepseek"` (after OpenRouter's balance is
+     exhausted, Codex and OpenRouter are both absent from the chain, or both
+     unavailable) → `bash .claude/bin/super-board-deepseek-balance.sh check
+     --config <config-path>` (reads `deepseek.floor_dollars`, default 1; needs
+     `DEEPSEEK_API_KEY` — DeepSeek's own direct platform.deepseek.com account,
+     independent of OpenRouter, its own separate $ balance):
+     - exit 0 (`ok`) → Build/QA only, `bash .claude/bin/super-board-deepseek-lane.sh
+       --config <config-path> --card '<card JSON>' --lane <build|qa>`. Report
+       line `🔁 deepseek fallback`.
+     - exit 10 (`pause`) or exit 3 (`unknown`) → treat as the plain pause below.
+     Re-run between cards, same as the OpenRouter leg. Without `"deepseek"` in
+     `usage_fallback` this leg is never attempted.
+   - No fallback leg available, or the last one in the chain also paused:
+     launch nothing new. A wave already running finishes — stopping it
+     mid-lane loses work. Then release claims as usual, post the resume note
+     (one line to the user and the run manifest:
+     `⏸ paused at <window> <used>% — resets <local time>; remaining: <N> cards; resume: /super-board run <slug>`
+     for the Claude window, or
+     `⏸ paused — <leg> balance at <remaining> (floor <floor>); remaining: <N> cards; resume: /super-board run <slug>`
+     for an OpenRouter/DeepSeek floor), remove the wave lock, and wait. If a
+     wake tool is available (`ScheduleWakeup`, or a `/loop` re-entry), schedule
+     `min(3600, resets_at - now + 60)` seconds for a Claude-window pause and
+     chain until the reset; an OpenRouter/DeepSeek floor pause has no reset
+     time, so schedule a longer check-back (e.g. 3600s) instead and re-run the
+     balance check on wake rather than assuming it changed. No wake tool →
+     stop with the note; the user resumes.
+   - exit 3 (unknown) on the Claude usage guard itself → launch, and say once
+     per run why the guard is blind (its `reason`). Do not halt a run on a
+     missing signal.
 
    The signal is the `rate_limits` block Claude Code pipes to the status line —
    the only scriptable source of plan usage (`/usage` is interactive; `ccusage`
@@ -296,6 +339,10 @@ don't stall on prompts:
     "Bash(bash .claude/bin/super-board-throttle.sh:*)",
     "Bash(bash .claude/bin/super-board-codex-lane.sh:*)",
     "Bash(bash .claude/bin/super-board-codex-wave.sh:*)",
+    "Bash(bash .claude/bin/super-board-openrouter-balance.sh:*)",
+    "Bash(bash .claude/bin/super-board-openrouter-lane.sh:*)",
+    "Bash(bash .claude/bin/super-board-deepseek-balance.sh:*)",
+    "Bash(bash .claude/bin/super-board-deepseek-lane.sh:*)",
     "Bash(bash .claude/bin/super-board-host.sh:*)",
     "Bash(bash .claude/bin/super-board-pr-body.sh:*)", "Bash(gh pr edit:*)",
     plus your project's test runners (e.g. "Bash(npm test:*)", "Bash(npx playwright:*)").
