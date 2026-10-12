@@ -434,5 +434,15 @@ Compare aggregate to `config.truth_threshold` (default `70`):
 - **Below threshold** → Reviewer MUST NOT approve. Open `[reviewer]`-prefixed PR thread quoting the lowest-confidence sub-agent finding. Write the full §4 Block template comment. Move card Review → Blocked with reason 🛡 truth-check failed (confidence X/100). The bot's "Why I cannot decide" line names the specific sub-agent finding it could not confirm.
 - **Above threshold** → continue to approval decision.
 
+## Doubt-driven pass and security checklist
+
+Before trusting any non-trivial claim, run the CLAIM → EXTRACT → DOUBT → RECONCILE → STOP
+loop in [`references/doubt-driven-review.md`](references/doubt-driven-review.md), and clear
+every item in [`../super-board/references/security-checklist.md`](../super-board/references/security-checklist.md)
+before calling a PR merge-ready. The shared principles every lane reads are in
+[`../super-board/references/principles.md`](../super-board/references/principles.md), and
+the standing bar a card must clear is
+[`../super-board/references/definition-of-done.md`](../super-board/references/definition-of-done.md).
+
 ### Block/Skip exits use the §4 mandatory template
 Same rule as super-build/super-qa.
