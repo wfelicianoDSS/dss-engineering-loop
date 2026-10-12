@@ -75,13 +75,41 @@ Write `None` **only** when nothing blocks the story. A line that says `None` *an
 names an issue is treated as unparseable → blocked, because that ambiguity has
 caused real misbuilds upstream. Put genuine blockers on their own lines.
 
-## Setup (not yet run)
+## Setup
 
-1. Fill in `project.number` in `profiles/fieldops.json` — `gh project list --owner wfelicianoDSS`
-2. Copy the profile into the fieldops repo as `.claude/super-board/configs/fieldops.json` (strip `//` comments)
-3. Run `/super-board onboard` in the fieldops repo to install guard hooks, `.claude/bin` scripts, and workflows
-4. Add `## Blocked by` sections to the active epic's stories
-5. Ensure the Project has all seven Status options: `Backlog, Ready, Building, QA, Review, Blocked, Done`
+1. ~~Fill in `project.number`~~ — done: project **1**, "FieldOps Development" (`PVT_kwHOD92re84BjenL`). Needs the `project` scope: `gh auth refresh -s project`.
+2. **Add the four missing Status options** (see below) — `/super-board onboard` does this and keeps every card.
+3. Copy the profile into the fieldops repo as `.claude/super-board/configs/fieldops.json` (strip `//` comments).
+4. Run `/super-board onboard` in the fieldops repo to install guard hooks, `.claude/bin` scripts, and workflows.
+5. Add `## Blocked by` sections to the active epic's stories.
+
+### Status column gap — blocks step 4
+
+The board currently carries GitHub's default five options:
+
+```
+Backlog, Ready, In progress, In review, Done
+```
+
+The engine needs seven:
+
+```
+Backlog, Ready, Building, QA, Review, Blocked, Done
+```
+
+`In progress` → `Building` and `In review` → `Review` are tolerated as aliases and
+canonicalized at read time, but **`QA` and `Blocked` do not exist at all**.
+
+`Blocked` is not optional for FieldOps: it is where the merge gate parks every PR
+that trips an `always_human` category (tenant, authz, migrations, lifecycle, money,
+evidence) — which is most FieldOps work. Without that column the risk router has
+nowhere to put a card, and `human-gate` has no destination.
+
+The board also carries DSS fields the engine does not read but which stay useful
+for curation: `Work Type` (Epic/Feature/User Story/Task/Bug), `Area`, `EPIC`,
+`Feature`, `Priority`, `Size`. Note the engine routes on the three repo **labels**
+(`qa`, `bug`, `feature`), not on `Work Type` — a story needs the label, not just
+the field.
 
 ## Autonomy maturity — where FieldOps actually is
 

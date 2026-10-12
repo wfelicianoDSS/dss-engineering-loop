@@ -17,10 +17,9 @@
 
   "project": {
     "owner": "wfelicianoDSS",
-    // FILL IN: `gh project list --owner wfelicianoDSS` — titles are not unique,
-    // the CLI needs the number.
-    "title": "FieldOps",
-    "number": 0
+    "title": "FieldOps Development",
+    // PVT_kwHOD92re84BjenL. `gh project` takes the number, not the title.
+    "number": 1
   },
 
   "worker_backend": "workflow",
