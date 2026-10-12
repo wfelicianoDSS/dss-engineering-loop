@@ -127,12 +127,20 @@ else
     rc=$?; echo "could not derive the dependency graph for ${REPO}" >&2; exit "$rc"; }
 fi
 
+# The graph is handed to jq through a FILE, never as an argv value: a full board's
+# graph is tens of KB, past the Windows/MSYS command-line limit for a native jq
+# (E2BIG "Argument list too long"). A file path is bounded; the payload rides the
+# file descriptor instead.
+DEPS_TMP=$(mktemp)
+trap 'rm -f "$DEPS_TMP"' EXIT
+printf '%s' "$DEPS" > "$DEPS_TMP"
+
 # Review extras used to be gated behind human_approves_merge, because concurrent
 # auto-merges into one base branch race. That guard now lives where the race
 # actually is — the merge step takes a lock inside the wave workflow and the
 # freshness gate re-verifies under it — so reviews may run in parallel here.
-echo "$ITEMS" | jq --argjson cols "$COLUMNS" --argjson cap "$MAX_WORKERS" --argjson deps "$DEPS" '
-  def dep($n): $deps[($n | tostring)];
+echo "$ITEMS" | jq --argjson cols "$COLUMNS" --argjson cap "$MAX_WORKERS" --slurpfile deps "$DEPS_TMP" '
+  def dep($n): $deps[0][($n | tostring)];
   # gh project item-list puts label names on the item (`labels`); some shapes put
   # them on the content, as strings or {name}. Lower-cased, names only.
   def labels_of: [ ((.labels // []) + (.content.labels // []))[]
