@@ -47,6 +47,36 @@
     "model": null
   },
 
+  // Optional OpenRouter lane settings — a usage_fallback leg only, same
+  // Build/QA-only, never-Review rule as codex. Independent account/balance
+  // from deepseek below — OpenRouter's /credits needs a Management key
+  // (OPENROUTER_MANAGEMENT_KEY), separate from the inference key
+  // (OPENROUTER_API_KEY) used for the actual chat completions.
+  "openrouter": {
+    // Optional model name for every card, passed to OpenRouter's chat
+    // completions endpoint. --model wins; absent/null uses the script's
+    // fixed default (see scripts/super-board-openrouter-lane.sh).
+    "model": null,
+    // Below this remaining credit (OpenRouter's /credits total_credits -
+    // total_usage), the leg pauses entirely — never spend the last reserve.
+    // Default 1.
+    "floor_credits": 1
+  },
+
+  // Optional DeepSeek lane settings — a usage_fallback leg only, same
+  // Build/QA-only, never-Review rule as codex/openrouter. DeepSeek's own
+  // direct account (platform.deepseek.com), independent of openrouter above —
+  // separate API key (DEEPSEEK_API_KEY), separate $ balance
+  // (api.deepseek.com/user/balance), not reached through OpenRouter.
+  "deepseek": {
+    // Optional model name for every card, passed to DeepSeek's chat
+    // completions endpoint. --model wins; absent/null uses the script's
+    // fixed default (see scripts/super-board-deepseek-lane.sh).
+    "model": null,
+    // Below this remaining USD balance, the leg pauses entirely. Default 1.
+    "floor_dollars": 1
+  },
+
   "target": {
     // "repo" | "repo+url". A board always drives a repo; `url` is the live or
     // preview site the Tester may also hit. Testing a live site with no repo is
@@ -245,12 +275,32 @@
   // Explicit `run --codex` skips this Claude-only guard.
   "usage_pause_pct": 95,
 
-  // What the orchestrator does while the usage guard pauses (exit 10).
-  //   "none"  — (default) launch nothing; wait for the reset.
-  //   "codex" — keep Build and QA moving one card at a time on Codex, headless
-  //             (super-board-codex-lane.sh without --codex). Review stays on
-  //             Claude: cards that reach Review wait there for the next Claude
-  //             wave. The launcher refuses a fallback lane without this value.
+  // What the orchestrator does while the usage guard pauses (exit 10). A bare
+  // string or an array naming a chain tried in order — e.g. ["codex",
+  // "openrouter", "deepseek"] tries Codex first, then OpenRouter once Codex
+  // is also unavailable, then DeepSeek once OpenRouter's balance guard also
+  // pauses. Review always stays on Claude in every leg; cards that reach
+  // Review wait there for the next Claude wave.
+  //   "none"        — (default) launch nothing; wait for the reset.
+  //   "codex"       — keep Build and QA moving one card at a time on Codex,
+  //                   headless (super-board-codex-lane.sh without --codex).
+  //                   No quota guard of its own — once chosen, always on.
+  //                   The launcher refuses a fallback lane without this value.
+  //   "openrouter"  — keep Build and QA moving one card at a time via
+  //                   OpenRouter's own account (super-board-openrouter-lane.sh),
+  //                   gated on remaining credit (super-board-openrouter-balance.sh
+  //                   check; see the `openrouter` block above). Needs
+  //                   OPENROUTER_API_KEY (inference) and OPENROUTER_MANAGEMENT_KEY
+  //                   (the /credits balance check) in the environment.
+  //   "deepseek"    — keep Build and QA moving one card at a time via
+  //                   DeepSeek's own direct account (super-board-deepseek-lane.sh),
+  //                   gated on remaining $ balance (super-board-deepseek-balance.sh
+  //                   check; see the `deepseek` block above). Needs
+  //                   DEEPSEEK_API_KEY in the environment. Independent of
+  //                   openrouter — a separate account and balance, not routed
+  //                   through OpenRouter.
+  // The launcher for any named leg refuses (exit 78) unless that leg's name
+  // is in the chain.
   "usage_fallback": "none",
 
   "verify_commands": [
