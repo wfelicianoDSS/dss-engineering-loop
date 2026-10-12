@@ -189,6 +189,13 @@ Super Build treats acceptance criteria as the completion contract. Workers must 
 
 The preamble at `references/worker-preamble.md` is the worker contract: decision policy, HUMAN GATE handling, the per-issue 14-gate contract, and final-commit format. The dispatcher prepends it to every worker prompt. See that file for the verbatim text.
 
+## TDD and verification
+
+The Builder writes tests first — red, green, refactor — and proves each change against
+the real artifact, never a self-report. Mechanics and test sizing are in
+[`references/tdd.md`](references/tdd.md); the shared engineering principles every lane
+reads first are in [`../super-board/references/principles.md`](../super-board/references/principles.md).
+
 ## Recovery / re-entry
 
 If the user invokes `/super-build` after a partial run:
