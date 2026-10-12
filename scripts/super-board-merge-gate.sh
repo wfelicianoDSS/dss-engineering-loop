@@ -343,7 +343,12 @@ fi
 # --match-head-commit makes GitHub refuse if anything was pushed after HEAD_SHA,
 # including during the verification run above.
 python3 "$GITHUB_READ" --check
-if gh pr merge "$PR" ${REPO:+--repo "$REPO"} --squash --delete-branch \
+# Delete the PR's branch on merge, but NEVER the base branch the board merges into.
+# A promotion PR has head == base_branch (e.g. staging -> main); --delete-branch on
+# it removes the base itself — this deleted `staging` on 2026-10-12.
+MERGE_DELETE=""
+if [ -n "$HEAD_REF" ] && [ "$HEAD_REF" != "$BASE" ]; then MERGE_DELETE="--delete-branch"; fi
+if gh pr merge "$PR" ${REPO:+--repo "$REPO"} --squash ${MERGE_DELETE} \
      ${SUBJECT:+--subject "$SUBJECT"} ${MSG_FILE:+--body-file "$MSG_FILE"} \
      --match-head-commit "$HEAD_SHA" 2>&1 | tail -3 >&2; then
   say "merged ${HEAD_SHA}"
