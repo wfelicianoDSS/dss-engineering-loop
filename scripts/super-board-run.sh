@@ -137,6 +137,10 @@ GROOM_SIG=""
 LANE_BACKEND=$(jq -r '.lane_backend // "claude"' "$CONFIG_PATH")
 PROGRESS_SECONDS=$(jq -r '.progress_seconds // 120' "$CONFIG_PATH")
 MAX_DISPATCHES=$(jq -r '.max_dispatches // 0' "$CONFIG_PATH")
+# Lease v2: a worker rewrites HEARTBEAT= before each write/merge/dispatch. A live pid
+# with a heartbeat older than this is suspect; at 2× it is terminated (hung), never a
+# dead-pid path (that one is handled immediately, as before).
+LEASE_TTL=$(jq -r '.lease_ttl_seconds // 2700' "$CONFIG_PATH")
 
 # Workflow is the default backend (v1.6.0). This legacy dispatcher only runs
 # when the config opts in explicitly — never by accident or stale habit.
@@ -162,6 +166,7 @@ fi  # end non-lib-only setup
 : "${INFLIGHT_DIR:=/dev/null}"
 : "${PROJECT_OWNER:=}" ; : "${PROJECT_NUMBER:=0}" ; : "${BOT_LOGIN:=}"
 : "${GROOM_ENABLED:=true}" ; : "${GROOM_READY_FLOOR:=1}" ; : "${GROOM_COOLDOWN:=1800}"
+: "${LEASE_TTL:=2700}"
 
 # Groom gate policy (pure; defined outside the non-lib block so gate tests can source it):
 # enabled, Ready at/below the floor, and either the backlog changed or the cooldown elapsed.
@@ -177,6 +182,16 @@ groom_due() { # $1=signature $2=last signature $3=last epoch $4=now epoch
 
 # ───────────────────────────── helpers ─────────────────────────────
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$RUN_MANIFEST"; }
+
+# One throttled line (per 30 min) in needs-attention.log so a frozen lane is visible
+# outside the run log without flooding it.
+attention() {
+  local file; file="$(dirname "$SB_GLOBAL_HALT_FILE")/needs-attention.log"
+  mkdir -p "$(dirname "$file")"
+  if [ ! -f "$file" ] || [ $(( $(date +%s) - $(stat -c %Y "$file" 2>/dev/null || echo 0) )) -ge 1800 ]; then
+    printf '%s %s\n' "$(date -u +%FT%TZ)" "$1" >> "$file"
+  fi
+}
 
 PROJECT_ITEMS_JSON=""
 fetch_project_items() {
@@ -301,10 +316,11 @@ EOF
 }
 
 read_lock() {
-  # Reads $INFLIGHT_DIR/$1 (bash-assignment format) into PID/LANE/STARTED.
-  # Sets empty strings if the file is missing or legacy single-PID format.
+  # Reads $INFLIGHT_DIR/$1 (bash-assignment format) into PID/LANE/PHASE/STARTED/
+  # HEARTBEAT/HEAD/PROVIDER. Sets empty strings if the file is missing or in the
+  # legacy single-PID format (v1 locks have no heartbeat: liveness is PID-only).
   local lock="$INFLIGHT_DIR/$1"
-  PID=""; LANE=""; STARTED=""; PROVIDER="claude"
+  PID=""; LANE=""; PHASE=""; STARTED=""; HEARTBEAT=""; HEAD=""; PROVIDER="claude"
   [ -f "$lock" ] || return 1
   if grep -q '^PID=' "$lock" 2>/dev/null; then
     # shellcheck disable=SC1090
@@ -477,20 +493,20 @@ dispatch_lane() {
   case "$provider" in
     codex)
       if [ -n "$review_wt" ]; then
-        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" nohup env -C "$review_wt" codex exec -s danger-full-access "$prompt" >> "$worker_log" 2>&1 &
+        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" SB_LEASE_FILE="$INFLIGHT_DIR/$issue" nohup env -C "$review_wt" codex exec -s danger-full-access "$prompt" >> "$worker_log" 2>&1 &
       else
-        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" nohup codex exec -s danger-full-access "$prompt" >> "$worker_log" 2>&1 &
+        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" SB_LEASE_FILE="$INFLIGHT_DIR/$issue" nohup codex exec -s danger-full-access "$prompt" >> "$worker_log" 2>&1 &
       fi
       ;;
     deepseek|openrouter)
       card_json=$(card_json_for "$issue")
-      SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" nohup bash ".claude/bin/super-board-${provider}-lane.sh" --config "$CONFIG_PATH" --lane "$lane" --card "$card_json" >> "$worker_log" 2>&1 &
+      SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" SB_LEASE_FILE="$INFLIGHT_DIR/$issue" nohup bash ".claude/bin/super-board-${provider}-lane.sh" --config "$CONFIG_PATH" --lane "$lane" --card "$card_json" >> "$worker_log" 2>&1 &
       ;;
     *)
       if [ -n "$review_wt" ]; then
-        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" nohup env -C "$review_wt" claude -p "$prompt" --dangerously-skip-permissions >> "$worker_log" 2>&1 &
+        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" SB_LEASE_FILE="$INFLIGHT_DIR/$issue" nohup env -C "$review_wt" claude -p "$prompt" --dangerously-skip-permissions >> "$worker_log" 2>&1 &
       else
-        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" nohup claude -p "$prompt" --dangerously-skip-permissions >> "$worker_log" 2>&1 &
+        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" SB_LEASE_FILE="$INFLIGHT_DIR/$issue" nohup claude -p "$prompt" --dangerously-skip-permissions >> "$worker_log" 2>&1 &
       fi
       ;;
   esac
@@ -499,10 +515,11 @@ dispatch_lane() {
   DISPATCH_COUNT=$((DISPATCH_COUNT + 1))
   DISPATCH_LOG="${DISPATCH_LOG}${issue}
 "
-  # v1.3.0+ lock format: bash-assignment style so `super-board stop` can source it
-  # to recover lane + dispatch time. issue_locked()/reap_finished_locks() still work
-  # because PID= is the first line.
-  printf 'PID=%s\nLANE=%s\nSTARTED=%s\nPROVIDER=%s\n' "$pid" "$lane" "$(date -u +%FT%TZ)" "$provider" > "$INFLIGHT_DIR/$issue"
+  # Lease v2 (bash-assignment style, PID= first): the worker's `--check` rewrites
+  # HEARTBEAT= before every write, so a live-but-hung pid is distinguishable from a
+  # working one. HEAD starts at - and is evidence, not a dispatch condition.
+  printf 'PID=%s\nLANE=%s\nPHASE=%s\nSTARTED=%s\nHEARTBEAT=%s\nHEAD=-\nPROVIDER=%s\n' \
+    "$pid" "$lane" "$lane" "$(date -u +%FT%TZ)" "$(date +%s)" "$provider" > "$INFLIGHT_DIR/$issue"
   case "$lane" in
     build) BUILD_PID="$pid"; BUILD_ISSUE="$issue" ;;
     build2) BUILD2_PID="$pid"; BUILD2_ISSUE="$issue" ;;
@@ -669,6 +686,32 @@ reap_finished_locks() {
     # would dissolve the backend mutual exclusion mid-run.
     case "$issue" in *[!0-9]*|'') continue ;; esac
     read_lock "$issue"
+    # Lease v2: a live pid is not proof of progress. A heartbeat older than the TTL is
+    # escalated once; at 2× the worker is hung — terminate it, keep the worktree, and
+    # release the claim so the card can be dispatched again.
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+      local hb age
+      hb=${HEARTBEAT:-0}
+      if [ "${hb:-0}" -gt 0 ] 2>/dev/null; then
+        age=$(( $(date +%s) - hb ))
+        if [ "$age" -ge $(( LEASE_TTL * 2 )) ]; then
+          attention "lease #${issue} pid=${PID} heartbeat stale ${age}s (>2×${LEASE_TTL}) — terminating hung worker"
+          kill -TERM "$PID" 2>/dev/null || true
+          if [ -n "$BOT_LOGIN" ]; then
+            gh_write_once issue edit "$issue" --remove-assignee "$BOT_LOGIN" >/dev/null 2>&1 || true
+          fi
+          gh_write_once issue comment "$issue" --body "[orchestrator] [report] lease reset
+Did: terminated a worker whose lease heartbeat was stale for ${age}s (pid ${PID})
+✅ Done: released the claim; the card stays in ${LANE:-its column} for a fresh dispatch
+❌ Not done: any work in the preserved worktree is unverified" >/dev/null 2>&1 || true
+          rm -f "$lock"
+          REAP_COUNT=$((REAP_COUNT + 1))
+        elif [ "$age" -ge "$LEASE_TTL" ]; then
+          attention "lease #${issue} pid=${PID} heartbeat stale ${age}s (>${LEASE_TTL}) — worker may be hung"
+        fi
+      fi
+      continue
+    fi
     if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
       if [ -f "$(card_halt_path "$issue")" ]; then
         block_card_read "$issue"

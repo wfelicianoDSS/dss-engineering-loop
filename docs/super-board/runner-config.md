@@ -13,6 +13,7 @@ pack; this is the runner contract, and it is what `config-schema.json` should gr
 | `no_progress_cycles` | `6` | Ticks without a Done before the runaway guard trips |
 | `max_dispatches` | `0` | Dispatch ceiling; `0` = none |
 | `progress_seconds` | `120` | Heartbeat interval for a running worker |
+| `lease_ttl_seconds` | `2700` | A lease heartbeat older than this is escalated; at 2× the worker is terminated |
 | `rebuild_cap` | `2` | Rebuild/review bounces before a card is parked |
 | `verify_commands` | `[]` | Commands the merge gate runs to prove the merge builds |
 | `usage_order` | `[claude, codex]` | Build/QA provider order |

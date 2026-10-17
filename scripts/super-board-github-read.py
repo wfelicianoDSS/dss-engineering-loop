@@ -87,6 +87,45 @@ def global_halt_path():
             os.environ['SB_GITHUB_HALT_FILE'] = scoped
 
 
+def heartbeat_lease():
+    """Rewrite HEARTBEAT= in the calling worker's lease, when it has one.
+
+    The worker's `--check` runs before every write, merge and dispatch, so this is a
+    liveness signal with zero prompt changes. Only v2 leases (PID= first line) are
+    touched; a missing/unwritable file is ignored — the heartbeat is observability,
+    never a reason a required read fails.
+    """
+    raw = os.environ.get('SB_LEASE_FILE')
+    if not raw:
+        return
+    path = Path(raw)
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return
+    if not lines or not lines[0].startswith('PID='):
+        return
+    stamp = f'HEARTBEAT={now()}'
+    out, seen = [], False
+    for line in lines:
+        if line.startswith('HEARTBEAT='):
+            out.append(stamp)
+            seen = True
+        else:
+            out.append(line)
+    if not seen:
+        out.append(stamp)
+    temp = path.with_name(path.name + '.tmp')
+    try:
+        temp.write_text('\n'.join(out) + '\n')
+        temp.replace(path)
+    except OSError:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+
+
 def check_halt():
     if halt_path().exists() or global_halt_path().exists():
         raise ReadHalted('GitHub reads are halted; inspect the saved reason and explicitly restart the run')
@@ -563,6 +602,7 @@ def main():
             return 0
         if args.check:
             check_halt()
+            heartbeat_lease()
             return 0
         meta = json.loads(Path(args.meta).read_text()) if args.meta else None
         output, _ = read(command, args.kind or 'json', meta)
