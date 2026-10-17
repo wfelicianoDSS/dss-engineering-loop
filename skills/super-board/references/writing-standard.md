@@ -329,8 +329,8 @@ Next: <owner>
 Header regex: `^\[(builder|qa|reviewer|collect|orchestrator)\] \[(blocker|issue|suggestion|nit|question|praise|report)\] \S`
 
 - ≤ 8 lines of prose. Evidence before adjectives: the command, the sha, the file:line.
-- Machine lines (`Local tests:`, `gh-quota-on-exit:`, `blocked-by:`, `root-cause-hash:`) go
-  last and do not count toward the 8.
+- Machine lines (`Local tests:`, `gh-quota-on-exit:`, `blocked-by:`, `block-class:`, `resume-when:`,
+  `root-cause-hash:`) go last and do not count toward the 8.
 - Screenshots (QA) go below, as an embedded table. They do not count either.
 - The Block template (`block-template.md`) uses the same header and keeps its fields.
 

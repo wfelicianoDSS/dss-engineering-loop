@@ -759,34 +759,125 @@ EOF
   done
 }
 
+# The newest value of a machine line in a Block comment, case-insensitive.
+machine_line() {
+  printf '%s\n' "$1" | grep -iE "^[[:space:]]*$2:" | tail -1 | sed -E 's/^[^:]*:[[:space:]]*//'
+}
+iso_epoch() {
+  python3 - "$1" <<'PY'
+import datetime, sys
+value = sys.argv[1].replace('Z', '+00:00')
+try:
+    print(int(datetime.datetime.fromisoformat(value).timestamp()))
+except Exception:
+    print(0)
+PY
+}
+ci_sha_green() {
+  local sha="$1" out
+  out=$(gh api "repos/{owner}/{repo}/commits/${sha}/check-runs" \
+        --jq '[.check_runs[] | select(.status == "completed") | .conclusion]
+              | if length == 0 then false
+                else all(. == "success" or . == "neutral" or . == "skipped") end' 2>/dev/null) || return 1
+  [ "$out" = true ]
+}
+# May the sweep move this card back to Ready? 0 = yes, 1 = no.
+# Pure policy over the machine lines, so the tests can exercise it offline.
+resume_when_met() { # $1 class, $2 resume-when, $3 legacy blocked-by
+  local class="$1" when="$2" legacy="$3" num st rc
+  case "$class" in
+    dependency)
+      [ -n "$legacy" ] || return 1
+      case "$legacy" in -) return 1 ;; esac
+      for num in $(printf '%s' "$legacy" | grep -oE '[0-9]+'); do
+        st=$(printf '%s' "$PROJECT_ITEMS_JSON" | jq -r --argjson n "$num" '.items[]|select(.content.number==$n)|.status' 2>/dev/null | head -1)
+        [ "$st" = "Done" ] && continue
+        issue_is_open "$num"; rc=$?
+        case "$rc" in 0) return 1 ;; 1) ;; *) return 1 ;; esac
+      done
+      return 0 ;;
+    transient)
+      case "$when" in
+        issues-closed:*) resume_when_met dependency "${when#issues-closed:}" "${when#issues-closed:}" ;;
+        after:*) [ "$(date +%s)" -ge "$(iso_epoch "${when#after:}")" ] ;;
+        provider-available:*) lane_provider "${when#provider-available:}" >/dev/null 2>&1 ;;
+        ci-rerun:*) ci_sha_green "${when#ci-rerun:}" ;;
+        *) return 1 ;;
+      esac ;;
+    *) return 1 ;;
+  esac
+}
+# The third transient block of one root cause stops being retried: a person decides.
+escalate_block() { # $1 issue, $2 root-cause hash, $3 occurrences
+  local issue="$1" kernel="$2" n="$3" note
+  note="$(dirname "$SB_GLOBAL_HALT_FILE")/needs-attention.log"
+  mkdir -p "$(dirname "$note")"
+  printf '%s sweep escalation: issue #%s hit the same transient block %s times (root-cause %s); converted to a human decision\n' \
+    "$(date -u +%FT%TZ)" "$issue" "$n" "$kernel" >> "$note" 2>/dev/null || true
+  gh_write_once issue comment "$issue" --body "[orchestrator] [blocker] 🛡 blocked · same transient failure ${n}×
+Card:        #${issue}
+Reason tag:  🛡 Safety / destructive
+Why blocked: the same transient condition (root-cause ${kernel}) parked this card ${n} times
+What blocks: a person decides whether to retry, change the approach, or close the card
+Owner:       Eric
+Move back:   drag this card to Ready after that decision
+block-class: human
+resume-when: human-done
+root-cause-hash: ${kernel}
+blocked-by:  -" >/dev/null 2>&1 || true
+  log "⚙️→🛡 #${issue}: transient block repeated ${n}× (root-cause ${kernel}) — escalated to a human"
+}
+
 sweep_blocked_by() {
-  # Free a card parked with `blocked-by: <n>` once EVERY referenced issue is closed.
-  # The workflow backend sweeps this at wave start; the claude-p runner must too, or a
-  # merged blocker strands the next card indefinitely (2026-10-15: #229 sat Blocked behind
-  # a merged #228 and the board went idle). One `gh issue view` per Blocked card, per sweep.
-  local issue item_id last blocked num st rc all
+  # Free a parked card when its own condition verifies. block-template.md:
+  #   dependency → issues-closed (the blocked-by numbers)
+  #   transient  → provider-available / ci-rerun / after / issues-closed
+  #   human      → never (a person moves it)
+  # A comment with no block-class keeps the old behavior: dependency when
+  # blocked-by lists issues, human otherwise. Third transient of one root cause
+  # converts to a human decision instead of being retried forever.
+  local issue item_id comments block blocked cls when kernel tag count
   while IFS=$'\t' read -r issue item_id; do
     [ -n "$issue" ] || continue
-    if issue_locked "$issue"; then continue; fi
-    last=$(gh issue view "$issue" --json comments -q '.comments[-1].body // ""' 2>/dev/null) || continue
-    blocked=$(printf '%s\n' "$last" | sed -n 's/^blocked-by:[[:space:]]*//p' | tail -1)
+    issue_locked "$issue" && continue
+    comments=$(gh issue view "$issue" --json comments -q '.comments' 2>/dev/null) || continue
+    [ -n "$comments" ] || continue
+    block=$(printf '%s' "$comments" | jq -r '
+      [ .[] | select([ (.body // "") | split("\n")[]
+                      | select(test("^[ \t]*(blocked-by|block-class):"; "i")) ] | length > 0) ]
+      | last | .body // ""' 2>/dev/null) || continue
+    [ -n "$block" ] || continue
+    blocked=$(machine_line "$block" blocked-by)
     [ -n "$blocked" ] || continue
-    case "$blocked" in -*|'') continue ;; esac     # `-`/empty = blocked for a reason, not sequencing
-    all=1
-    for num in $(printf '%s' "$blocked" | grep -oE '[0-9]+'); do
-      st=$(echo "$PROJECT_ITEMS_JSON" | jq -r --argjson n "$num" '.items[]|select(.content.number==$n)|.status' 2>/dev/null | head -1)
-      if [ "$st" = "Done" ]; then continue; fi      # blocker already landed on the board
-      if issue_is_open "$num"; then rc=0; else rc=$?; fi
-      case "$rc" in 1) ;; 0) all=0 ;; *) return 1 ;; esac   # 1 = CLOSED → resolved
-    done
-    [ "$all" -eq 1 ] || continue
+    cls=$(machine_line "$block" block-class | tr '[:upper:]' '[:lower:]')
+    when=$(machine_line "$block" resume-when)
+    kernel=$(machine_line "$block" root-cause-hash)
+    tag=$(machine_line "$block" "Reason tag")
+    [ -n "$cls" ] || { case "$blocked" in -|*[!0-9,]*) cls=human ;; *) cls=dependency ;; esac; }
+    # transient is only valid with ⚙️; the tag wins over the class (block-template.md).
+    if [ "$cls" = transient ] && ! printf '%s' "$tag" | grep -q '⚙'; then cls=human; fi
+    if [ "$cls" = transient ] && [ -n "$kernel" ]; then
+      count=$(printf '%s' "$comments" | jq -r --arg h "$kernel" '
+        [ .[] | (.body // "") as $b
+          | select(([ $b | split("\n")[]
+                      | select(test("^[ \t]*block-class:"; "i"))
+                      | sub("^[ \t]*block-class:[ \t]*"; ""; "i") ] | last // "" | ascii_downcase) == "transient")
+          | select($b | contains($h)) ] | length' 2>/dev/null) || count=0
+      if [ "${count:-0}" -ge 3 ]; then
+        escalate_block "$issue" "$kernel" "$count"
+        continue
+      fi
+    fi
+    [ "$cls" = human ] && continue
+    [ "$cls" = dependency ] && [ -z "$when" ] && when="issues-closed:${blocked}"
+    resume_when_met "$cls" "$when" "$blocked" || continue
     if set_card_status "$item_id" Ready; then
       PROJECT_ITEMS_JSON=$(echo "$PROJECT_ITEMS_JSON" | jq --argjson n "$issue" '(.items[]|select(.content.number==$n)|.status)="Ready"')
       gh_write_once issue comment "$issue" --body "[orchestrator] [report] unblocked
-Did: every blocked-by issue is closed
+Did: ${cls} condition verified (${when})
 ✅ Done: moved Blocked → Ready to build
 blocked-by: none" >/dev/null
-      log "unblocked #${issue}: blockers closed → Ready"
+      log "unblocked #${issue}: ${when} verified → Ready"
     fi
   done <<EOF
 $(echo "$PROJECT_ITEMS_JSON" | jq -r '.items[] | select(.status == "Blocked" and .content.type == "Issue") | [(.content.number|tostring), .id] | @tsv')

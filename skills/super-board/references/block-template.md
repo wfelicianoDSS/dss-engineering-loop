@@ -41,6 +41,8 @@ To unblock:  <concrete action the human can take, in their own checklist form>
              [ ] <step 2>
 Owner:       <who acts next — "Eric", "repo admin", "design" — never "someone">
 Move back:   drag this card to Ready after the steps above are done
+block-class: <human | dependency | transient>
+resume-when: <issues-closed:1,2 | human-done | provider-available:<lane> | ci-rerun:<sha> | after:<iso> | never>
 blocked-by:  <comma-separated issue numbers, or "-" if nothing on this board clears it>
 ```
 
@@ -66,6 +68,34 @@ none and then names an issue is read as *no blocker* by the sweep and as *one bl
 and the sweep is the one that acts. That exact shape shipped on a real board and is the reason
 `super-board-deps.sh` refuses to guess at it.
 
+### `block-class:` and `resume-when:` — what the sweep may do
+
+Two lines above `blocked-by:` tell the sweep *why* the card is parked and *what would clear it*.
+Without them the sweep can only guess from `blocked-by:`, and a guess either frees a card that
+needs a person or strands one that only needed a retry.
+
+| `block-class:` | Allowed reason tags | `resume-when:` | Who moves it back |
+|---|---|---|---|
+| `human` | `🔐` `💳` `🔑` `❓` `🛡` `🧑` `🎨` `📦` `👯` | `human-done` (`🙋`) or `never` | A person |
+| `dependency` | `⏳` | `issues-closed:<n,…>` | The sweep, when every issue closed |
+| `transient` | `⚙️` **only** | `provider-available:<lane>`, `ci-rerun:<sha>`, `after:<iso>`, `issues-closed:<n,…>` | The sweep, when the condition verifies |
+
+- **`⚙️` is the only tag allowed with `transient`.** A `🔐` block that claims `transient` is treated as
+  `human` by every reader: the tag wins over the class, because a credential wall is not a timeout.
+- A `transient` block also carries `attempts: <n>` — how many times this exact failure has parked the
+  card. The **third** transient block with the same `root-cause-hash:` is converted to a 🛡 `human`
+  block by the sweep, with one line in `.claude/super-board/needs-attention.log`. Repeating a retry
+  that keeps failing spends provider budget without moving the card.
+- `after:<iso>` is an absolute instant (`2026-10-20T14:00:00Z`, or a date for midnight UTC). The lane
+  that parks the card writes the instant it may retry, not a duration.
+- `provider-available:<lane>` clears as soon as the lane has any unpaused provider;
+  `ci-rerun:<sha>` clears when every completed check run for that commit is success, neutral or
+  skipped. Nothing else is auto-cleared.
+- **Backward compatible.** A Block comment with no `block-class:` is `dependency` when `blocked-by:`
+  lists issue numbers, and `human` otherwise. That is exactly what the sweep did before these lines
+  existed, so old comments keep their old behavior.
+
+
 The same rule governs the issue body's `## Blocked by` section, which is where the sweep looks when
 a card has no block comment yet. Bullets of the form `- #N — why`, or a single `- None.` — nothing
 else parses.
@@ -89,6 +119,7 @@ closed as not planned (`gh issue close <N> --reason "not planned"`) and moves to
 | 🎨    | Pure design                 | no measurable AC; needs design pass first                                |
 | 👯    | Duplicate                   | pre-flight: a merged PR already delivers it, or an open PR / card is building it |
 | ⏳    | Sequenced                   | pre-flight: an open PR touches the same files — waits on the issue that PR closes |
+| ⚙️    | Infra / transient           | provider timeout, 5xx, network, CI flake. The only tag allowed with `block-class: transient` |
 | 🙋    | Needs you (human-only step) | merge gate exit 7 (merge_policy: money/auth/schema/size — review and merge it, or comment `done` to approve) or exit 8: a migration for a DB the robot may not touch, an allowed migrate command failed, a `needs-you:` step in the PR body, `migrations.human_steps` |
 
 ## 🙋 Needs you — a command only a human may run

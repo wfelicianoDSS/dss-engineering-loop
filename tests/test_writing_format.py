@@ -199,6 +199,22 @@ def test_block_template_uses_the_header():
     assert "Reason tag:" in text, "super-board-deps.sh parses 'Reason tag:'"
 
 
+def test_block_template_declares_the_sweep_contract():
+    """block-template.md pins the two lines the sweep reads, in order, before blocked-by."""
+    text = (REF / "block-template.md").read_text(encoding="utf-8")
+    template = next(b for b in fenced(text) if b.startswith("[<role>] [blocker] 🛑"))
+    lines = [l for l in template.splitlines() if l.strip()]
+    fields = ("block-class:", "resume-when:", "blocked-by:")
+    for field in fields:
+        assert any(l.startswith(field) for l in lines), f"the template is missing {field}"
+    order = [next(i for i, l in enumerate(lines) if l.startswith(f)) for f in fields]
+    assert order == sorted(order), "block-class and resume-when go above blocked-by"
+    for value in ("`human`", "`dependency`", "`transient`"):
+        assert value in text, f"the class vocabulary must name {value}"
+    assert "only tag allowed with" in text, "the ⚙️-only rule must be stated"
+    assert re.search(r"^\| ⚙️\s*\|", text, flags=re.M), "the reason table needs the ⚙️ row"
+
+
 def test_needs_you_comment_is_checklist_first():
     """The 🙋 comment shows what to do first; why and evidence fold away; the planner's lines stay."""
     text = (REF / "block-template.md").read_text(encoding="utf-8")
