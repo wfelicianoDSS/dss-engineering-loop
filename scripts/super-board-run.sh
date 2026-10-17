@@ -176,6 +176,19 @@ groom_due() { # $1=signature $2=last signature $3=last epoch $4=now epoch
   [ "${1:-}" != "${2:-}" ] && return 0
   [ $(( ${4:-0} - ${3:-0} )) -ge "${GROOM_COOLDOWN:-1800}" ]
 }
+# Event-driven grooming: only Backlog stories without a current readiness certificate.
+# The certificate cache is written by super-board-ready-cert.py --post; an empty
+# selection means no agent call at all.
+groom_certs_dir() { printf '%s' "${SB_GROOM_CERTS:-.claude/super-board/ready-certs}"; }
+groom_selection() {
+  local items dir; items=$(mktemp); dir=$(groom_certs_dir)
+  mkdir -p "$dir"
+  printf '%s' "$PROJECT_ITEMS_JSON" > "$items"
+  python3 "$(dirname "$SB_GITHUB_READ")/super-board-groom-select.py" \
+    --items "$items" --comments-dir "$dir" 2>/dev/null || echo '[]'
+  rm -f "$items"
+}
+
 # Pure review-reuse policy: a finished review of the current head must not be repeated.
 # merged → Done (never merge twice); approve + same head → merge only; otherwise review.
 review_decision() { # $1=mergedAt $2=headRefOid $3=mergeCommit $4=verdict $5=reviewed-head
@@ -602,7 +615,7 @@ dispatch_groom() {
   # keeps getting refined (and Ready stays stocked) while the paid plans are exhausted.
   local prompt pid worker_log provider
   provider=$(lane_provider groom) || return 0
-  prompt="Run super-groom for super-board run. Read .claude/skills/super-groom/SKILL.md (and .claude/skills/super-board/references/run.md). Config: ${CONFIG_PATH}."
+  prompt="Run super-groom for super-board run. Read .claude/skills/super-groom/SKILL.md (and .claude/skills/super-board/references/run.md). Config: ${CONFIG_PATH}. Groom only the issues in SB_GROOM_SELECTED (JSON list; unset = the normal Backlog). After a story passes groom/lint, record its readiness certificate: python3 .claude/bin/super-board-ready-cert.py --items <board-items.json> --issue <N> --post — an unchanged certified story is then skipped."
   worker_log="${WORKER_LOG_DIR}/worker-groom.log"
   {
     printf '=== dispatch lane=groom backend=%s at %s ===\n' "$provider" "$(date -u +%FT%TZ)"
@@ -611,11 +624,11 @@ dispatch_groom() {
   gh_checkpoint
   case "$provider" in
     codex)
-      nohup codex exec -s danger-full-access "$prompt" >> "$worker_log" 2>&1 & ;;
+      SB_GROOM_SELECTED="${GROOM_SELECTED:-}" nohup codex exec -s danger-full-access "$prompt" >> "$worker_log" 2>&1 & ;;
     deepseek|openrouter)
-      nohup bash ".claude/bin/super-board-${provider}-lane.sh" --config "$CONFIG_PATH" --lane groom >> "$worker_log" 2>&1 & ;;
+      SB_GROOM_SELECTED="${GROOM_SELECTED:-}" nohup bash ".claude/bin/super-board-${provider}-lane.sh" --config "$CONFIG_PATH" --lane groom >> "$worker_log" 2>&1 & ;;
     *)
-      nohup claude -p "$prompt" --dangerously-skip-permissions >> "$worker_log" 2>&1 & ;;
+      SB_GROOM_SELECTED="${GROOM_SELECTED:-}" nohup claude -p "$prompt" --dangerously-skip-permissions >> "$worker_log" 2>&1 & ;;
   esac
   pid=$!
   GROOM_PID="$pid"; GROOM_PROVIDER="$provider"
@@ -1356,7 +1369,13 @@ while true; do
     GROOM_LAST_SIG=$(jq -r '.sig // ""' "$GROOM_STATE" 2>/dev/null || echo "")
     GROOM_LAST_AT=$(jq -r '.at // 0' "$GROOM_STATE" 2>/dev/null || echo 0)
     if groom_due "$GROOM_SIG" "$GROOM_LAST_SIG" "$GROOM_LAST_AT" "$(date +%s)"; then
-      dispatch_groom
+      GROOM_SELECTED=$(groom_selection)
+      if [ "$GROOM_SELECTED" = "[]" ]; then
+        log "groom skipped — every Backlog story has a current readiness certificate"
+      else
+        log "groom selection: ${GROOM_SELECTED}"
+        dispatch_groom
+      fi
     else
       log "groom skipped — backlog unchanged (${GROOM_SIG}); forced groom in ≤${GROOM_COOLDOWN}s"
     fi
