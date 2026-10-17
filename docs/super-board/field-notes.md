@@ -58,6 +58,24 @@ current: every recurring failure here is a fix that should reach the scripts or 
 - **The checkout drifts onto feature branches.** Sync it to the base branch before restarting, or
   the runner reads old control-plane code.
 
+## Provider and lease recovery (headless runner)
+
+- **A vendor pause with no reset time parked a usable provider for hours.** Health state now
+  pauses to the reset (or 5 min), then allows exactly one probe — success closes it, failure
+  backs off. Test: `tests/test_providers.py`.
+- **A live pid with a dead heartbeat looked healthy forever.** Leases carry `HEARTBEAT=`,
+  rewritten by the worker's `--check`; stale at `lease_ttl_seconds`, terminated at 2×.
+  Test: `tests/test-lease.sh`.
+- **A merged PR could sit in Review and be reviewed/merged again.** A merged PR now reconciles
+  to Done after an ancestry check; an approved, unchanged head dispatches merge-only.
+  Test: `tests/test-review-reuse.sh`.
+- **Re-grooming an unchanged backlog burned tokens every cooldown.** A readiness certificate
+  per story (`sb-ready v1`) leaves an empty selection and no agent call. Test:
+  `tests/test_ready_cert.py`.
+- **Recovery logic was spread across helpers.** `super-board-reconcile.py` reports one plan per
+  tick and applies only dead-lease release; it never dispatches a live lease or a person's card.
+  Test: `tests/test_reconcile.py`.
+
 ## Fix agents
 
 - **A watchdog that dispatches a Codex/Claude "fix agent" spends worker quota on board plumbing.**

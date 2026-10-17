@@ -39,6 +39,7 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:$HOME/.local/node/bin:$HOME/.opencode/bin:$HOME/.dotnet:$PATH"
 
 SB_GITHUB_READ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/super-board-github-read.py"
+SB_RECONCILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/super-board-reconcile.py"
 SB_GLOBAL_HALT_FILE="${SB_GITHUB_HALT_FILE:-$(pwd)/.claude/super-board/github-halt.json}"
 export SB_GITHUB_GLOBAL_HALT_FILE="$SB_GLOBAL_HALT_FILE"
 gh_checkpoint() { SB_GITHUB_HALT_FILE="$SB_GLOBAL_HALT_FILE" python3 "$SB_GITHUB_READ" --check || exit $?; }
@@ -1014,13 +1015,17 @@ provider_limit_log() {
   tail -n 5 "$file" | grep -qiE "$pattern"
 }
 pause_provider() {
-  local pause_dir source="${3:-vendor}" existing_source
+  local pause_dir source="${3:-vendor}" existing_source prov_bin
   pause_dir="${SB_PROVIDER_PAUSE_DIR:-$(dirname "$SB_GLOBAL_HALT_FILE")/provider-pauses}"
   mkdir -p "$pause_dir"
   existing_source=$(jq -r '.source // "vendor"' "$pause_dir/$1" 2>/dev/null || echo vendor)
   # Keep the first terminal limit's time; repeated log scans must not move it.
   if [ -f "$pause_dir/$1" ] && [ "$existing_source" = vendor ]; then return 0; fi
   jq -n --arg reason "$2" --arg source "$source" '{at:(now | floor),source:$source,reason:$reason}' > "$pause_dir/$1"
+  prov_bin="$(dirname "$SB_GITHUB_READ")/super-board-providers.py"
+  if [ -f "$prov_bin" ]; then
+    python3 "$prov_bin" fail "$1" --quota --reason "$2" >/dev/null 2>&1 || true
+  fi
   log "paused $1 lanes: $2 (read-only; the runner owns backend selection)"
 }
 provider_usage_check() {
@@ -1081,8 +1086,15 @@ lane_provider() {
   return 1
 }
 provider_dispatch_allowed() {
-  local provider="$1" result rc=0 state pause_dir pause_at recorded_at source
+  local provider="$1" result rc=0 state pause_dir pause_at recorded_at source prov_bin
   pause_dir="${SB_PROVIDER_PAUSE_DIR:-$(dirname "$SB_GLOBAL_HALT_FILE")/provider-pauses}"
+  # Health scheduler (PR 9): a paused/open circuit or a probing provider that already
+  # spent its one probe. Absent state file = ok, so this never blocks a fresh install.
+  prov_bin="$(dirname "$SB_GITHUB_READ")/super-board-providers.py"
+  if [ -f "$prov_bin" ] && ! python3 "$prov_bin" allowed "$provider" >/dev/null 2>&1; then
+    log "provider ${provider} parked by health state (see .claude/super-board/providers/)"
+    return 1
+  fi
   # A vendor pause records a rate-limit window (~5h). Once that window has elapsed the pause
   # is stale — clear it, since these providers have no usage snapshot to disconfirm it. A
   # stale pause otherwise parks a fully-available provider until a manual reset (2026-10-14).
@@ -1097,7 +1109,16 @@ provider_dispatch_allowed() {
   fi
   result=$(provider_usage_check "$provider") || rc=$?
   state=$(printf '%s' "$result" | jq -r '.state // "unknown"' 2>/dev/null || echo unknown)
-  if [ "$state" = pause ]; then pause_provider "$provider" "$(printf '%s' "$result" | jq -r .reason)" snapshot; return 1; fi
+  if [ "$state" = pause ]; then
+    pause_provider "$provider" "$(printf '%s' "$result" | jq -r .reason)" snapshot
+    [ -f "$prov_bin" ] && python3 "$prov_bin" fail "$provider" --quota \
+      --reason "$(printf '%s' "$result" | jq -r '.reason // "quota"')" >/dev/null 2>&1 || true
+    return 1
+  fi
+  if [ "$state" = ok ] && [ -f "$prov_bin" ] \
+     && [ -f "${SB_PROVIDER_STATE_DIR:-.claude/super-board/providers}/${provider}.json" ]; then
+    python3 "$prov_bin" success "$provider" >/dev/null 2>&1 || true
+  fi
   if [ "$state" = ok ] && [ -f "$pause_dir/$provider" ]; then
     source=$(jq -r '.source // "vendor"' "$pause_dir/$provider" 2>/dev/null || echo vendor)
     pause_at=$(jq -r '.at // 0' "$pause_dir/$provider" 2>/dev/null || echo 0)
@@ -1329,6 +1350,21 @@ while true; do
   reap_finished_locks   # every tick: a restart-stranded QA/Review card recovers without a manual unlock
   reclaim_stranded_building
   sweep_blocked_by   # free cards whose blocked-by issues have since closed
+
+  # One recovery contract for the tick (PR 8). It applies only what is transport-safe
+  # here (dead/stale lease release) and reports dispatch/sweep for the log; the runner
+  # keeps the board-field mutations and dispatch. Absent script = no-op.
+  if [ -f "$SB_RECONCILE" ]; then
+    RECON_ITEMS=$(mktemp)
+    printf '%s' "$PROJECT_ITEMS_JSON" > "$RECON_ITEMS"
+    RECON_PLAN=$(python3 "$SB_RECONCILE" --config "$CONFIG_PATH" --items "$RECON_ITEMS" \
+      --leases-dir "$INFLIGHT_DIR" --halt "$SB_GLOBAL_HALT_FILE" \
+      --providers-dir "${SB_PROVIDER_STATE_DIR:-.claude/super-board/providers}" --apply 2>/dev/null) || true
+    rm -f "$RECON_ITEMS"
+    if [ -n "$RECON_PLAN" ]; then
+      log "reconcile — dispatch=$(printf '%s' "$RECON_PLAN" | jq -c '.dispatch // []') sweep=$(printf '%s' "$RECON_PLAN" | jq -c '.sweep // []')"
+    fi
+  fi
 
   # Re-sweep zombies against fresh cache; the previous sweep used stale data.
   sweep_lane_zombies

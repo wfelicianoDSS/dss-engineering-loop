@@ -43,6 +43,15 @@ pack; this is the runner contract, and it is what `config-schema.json` should gr
 `SB_PAUSE_TTL`, default 30 min). A lane with no provider writes a throttled entry to
 `.claude/super-board/needs-attention.log`.
 
+**Provider health** is `.claude/super-board/providers/<name>.json` (`state`, `paused_until`,
+`consecutive_failures`, `probe_interval`). A quota limit pauses until the reset (or 5 min), then
+allows exactly one probe; 3 non-quota failures open the circuit for 30 min. Managed by
+`super-board-providers.py`; a missing file means `ok`.
+
+**Leases** (`inflight/<issue>`) carry `HEARTBEAT=` (rewritten by the worker's `--check`). A live
+pid beyond `lease_ttl_seconds` is escalated to `needs-attention.log`; at 2× it is terminated and
+the claim released.
+
 **Migrations in the runner:** a migration PR is human-gated unless the env is in `allowed_envs`
 and has a command; with no reachable DB, declare `commands.<env> = "-"` (pipeline applies it) or
 the gate can never pass.
