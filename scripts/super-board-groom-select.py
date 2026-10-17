@@ -48,11 +48,15 @@ def main() -> int:
     for item in items:
         if not isinstance(item, dict) or item.get("status") != "Backlog":
             continue
-        number = item.get("number")
+        # The runner's board snapshot nests the issue under `content`; the groom
+        # worker's flat item list does not. Accept both shapes.
+        content = item.get("content") or {}
+        number = item.get("number", content.get("number"))
         if type(number) is not int:
             continue
-        wanted = content_hash(item.get("title") or "", item.get("body") or "",
-                              item.get("labels"))
+        wanted = content_hash(item.get("title", content.get("title")) or "",
+                              item.get("body", content.get("body")) or "",
+                              item.get("labels", content.get("labels")))
         text = ""
         if args.comments_dir:
             path = pathlib.Path(args.comments_dir) / f"{number}.md"

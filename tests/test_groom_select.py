@@ -53,6 +53,14 @@ class GroomSelectTests(unittest.TestCase):
         stale = cert(1, issue["title"], "old body", issue["labels"])
         self.assertEqual(self.run_select([issue], {1: stale}), [1])
 
+    def test_runner_board_shape_is_selected_and_certified(self):
+        item = {"status": "Backlog", "content": {
+            "number": 11, "title": "US-11", "body": "story", "labels": ["feature"]}}
+        self.assertEqual(self.run_select([item]), [11], "nested board item is selected")
+        comments = {11: cert(11, "US-11", "story", ["feature"])}
+        self.assertEqual(self.run_select([item], comments), [],
+                         "a nested board item with a current certificate is skipped")
+
     def test_non_backlog_and_non_issue_skipped(self):
         items = [self.issue(status="Ready"), self.issue(number=2, status="Backlog"), "junk"]
         self.assertEqual(self.run_select(items), [2])

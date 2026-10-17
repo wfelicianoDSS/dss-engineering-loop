@@ -37,15 +37,27 @@ def content_hash(title: str, body: str, labels) -> str:
 
 
 def certificate(item, checks: str) -> str:
-    digest = content_hash(item.get('title') or '', item.get('body') or '', item.get('labels'))
+    title, body, labels = fields(item)
+    digest = content_hash(title, body, labels)
     return f'<!-- sb-ready v1 hash={digest} checks={checks} -->'
 
 
 def find_item(items, number: int):
     for item in items:
-        if isinstance(item, dict) and item.get('number') == number:
+        if not isinstance(item, dict):
+            continue
+        content = item.get('content') or {}
+        if item.get('number', content.get('number')) == number:
             return item
     return None
+
+
+def fields(item) -> tuple:
+    # Accept both the runner's nested board snapshot and a flat issue object.
+    content = item.get('content') or {}
+    return (item.get('title', content.get('title')) or '',
+            item.get('body', content.get('body')) or '',
+            item.get('labels', content.get('labels')))
 
 
 def main() -> int:

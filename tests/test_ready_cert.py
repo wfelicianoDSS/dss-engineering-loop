@@ -55,6 +55,14 @@ class ReadyCertTests(unittest.TestCase):
     def test_uncertified_is_selected(self):
         self.assertEqual(self.select(), [7])
 
+    def test_nested_board_shape_works(self):
+        nested = {'status': 'Backlog', 'content': {
+            'number': 7, 'title': 'US-7', 'body': 'story', 'labels': ['feature']}}
+        self.write_items([nested])
+        result = self.cert('--post')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.select(), [])
+
     def test_post_writes_comment_and_offline_cache(self):
         result = self.cert('--post')
         self.assertEqual(result.returncode, 0, result.stderr)
