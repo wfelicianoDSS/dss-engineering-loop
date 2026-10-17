@@ -963,6 +963,15 @@ if [ "$BASE_BRANCH" = "main" ] && [ "$HUMAN_APPROVES" = "false" ]; then
   fi
 fi
 
+# Refuse to start from a drifted checkout: a runner on a feature branch reads stale
+# control-plane code (field note: "Checkout drifts onto a feature branch").
+CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || true)
+if [ -n "$CURRENT_BRANCH" ] && [ -n "${BASE_BRANCH:-}" ] && [ "$CURRENT_BRANCH" != "$BASE_BRANCH" ]; then
+  echo "refusing to start: checkout is on '$CURRENT_BRANCH', not base '$BASE_BRANCH'." >&2
+  echo "  sync first: git fetch origin --prune && git checkout -f -B $BASE_BRANCH origin/$BASE_BRANCH" >&2
+  exit 73
+fi
+
 # Existing legacy work is inspected/moved by a human, never deleted on upgrade.
 check_legacy_worktrees
 cleanup_stale_worktrees
