@@ -134,14 +134,6 @@ GROOM_READY_FLOOR=$(jq -r '.groom.ready_floor // 1' "$CONFIG_PATH")
 GROOM_COOLDOWN=$(jq -r '.groom.cooldown_seconds // 1800' "$CONFIG_PATH")
 GROOM_STATE=".claude/super-board/groom-state.json"
 GROOM_SIG=""
-# Pure policy: is a groom due? Enabled, Ready at/below the floor, and either the backlog
-# changed or the cooldown elapsed. Extracted so it is testable without a tick.
-groom_due() { # $1=signature $2=last signature $3=last epoch $4=now epoch
-  [ "${GROOM_ENABLED:-true}" = "true" ] || return 1
-  [ "${READY:-0}" -le "${GROOM_READY_FLOOR:-1}" ] || return 1
-  [ "${1:-}" != "${2:-}" ] && return 0
-  [ $(( ${4:-0} - ${3:-0} )) -ge "${GROOM_COOLDOWN:-1800}" ]
-}
 LANE_BACKEND=$(jq -r '.lane_backend // "claude"' "$CONFIG_PATH")
 PROGRESS_SECONDS=$(jq -r '.progress_seconds // 120' "$CONFIG_PATH")
 MAX_DISPATCHES=$(jq -r '.max_dispatches // 0' "$CONFIG_PATH")
@@ -169,6 +161,16 @@ fi  # end non-lib-only setup
 : "${WORKER_LOG_DIR:=/dev/null}"
 : "${INFLIGHT_DIR:=/dev/null}"
 : "${PROJECT_OWNER:=}" ; : "${PROJECT_NUMBER:=0}" ; : "${BOT_LOGIN:=}"
+: "${GROOM_ENABLED:=true}" ; : "${GROOM_READY_FLOOR:=1}" ; : "${GROOM_COOLDOWN:=1800}"
+
+# Groom gate policy (pure; defined outside the non-lib block so gate tests can source it):
+# enabled, Ready at/below the floor, and either the backlog changed or the cooldown elapsed.
+groom_due() { # $1=signature $2=last signature $3=last epoch $4=now epoch
+  [ "${GROOM_ENABLED:-true}" = "true" ] || return 1
+  [ "${READY:-0}" -le "${GROOM_READY_FLOOR:-1}" ] || return 1
+  [ "${1:-}" != "${2:-}" ] && return 0
+  [ $(( ${4:-0} - ${3:-0} )) -ge "${GROOM_COOLDOWN:-1800}" ]
+}
 # Board checkout root: Review reads policy (skill, run.md, gate) from HERE, never the card
 # worktree, so a policy change reaches in-flight cards (2026-10-15 review-loop lesson).
 : "${BOARD_ROOT:=$(pwd)}"
