@@ -113,4 +113,35 @@ get 28 '.needsYouDone == false' || fail "#28: a 'done' before the 🙋 block mus
 get 26 '.runnable == false'     || fail "#26: done goes through resume, never the Ready sweep"
 get 2  '.needsYou == false and .needsYouDone == false' || fail "an ordinary card is not needsYou"
 
-echo "PASS: test-deps.sh (18 scenarios)"
+# ---- block-class: / resume-when: (block-template.md) ---------------------
+# 19 — transient with the ⚙️ tag, waiting on a provider. The condition needs live
+#      provider state, so the offline parser reports it as not runnable here.
+get 30 '.blockClass == "transient" and .resumeWhen == "provider-available:build"' || fail "#30 should keep its transient condition"
+get 30 '.attempts == 1' || fail "#30 should carry its attempts"
+get 30 '.rootCause == "rc-abc123"' || fail "#30 should carry its root cause"
+get 30 '.runnable == false' || fail "#30 cannot be judged offline"
+
+# 20 — after:<past> has passed, after:<future> has not. This is the one transient
+#      condition the parser can decide without GitHub or a provider probe.
+get 31 '.blockClass == "transient" and .runnable == true' || fail "#31 should be free once the instant passed"
+get 32 '.blockClass == "transient" and .runnable == false' || fail "#32 must wait for its instant"
+
+# 21 — THE TAG WINS. A credential wall that claims `transient` is a human block;
+#      no sweep may retry it as if it were a timeout.
+get 33 '.blockClass == "human" and .humanGated == true and .runnable == false' \
+  || fail "#33: 🔐 must never be transient"
+
+# 22 — the third transient block of one root cause escalates to a human decision.
+get 34 '.escalated == true' || fail "#34 should escalate on the third occurrence"
+get 34 '.blockClass == "human" and .humanGated == true and .runnable == false' \
+  || fail "#34 must stop being swept after escalation"
+
+# 23 — a transient block waiting on issues clears exactly like a dependency.
+get 35 '.blockClass == "transient" and .resumeWhen == "issues-closed:99"' || fail "#35 should read its condition"
+get 35 '.runnable == true' || fail "#35: all listed issues are closed"
+
+# 24 — a transient block with no condition never clears itself (fail safe).
+get 36 '.blockClass == "transient" and .resumeWhen == "never" and .runnable == false' \
+  || fail "#36 must not resume without a condition"
+
+echo "PASS: test-deps.sh (24 scenarios)"

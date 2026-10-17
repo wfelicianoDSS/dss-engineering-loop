@@ -181,5 +181,102 @@
         }
       ]
     }
+  },
+  {
+    "number": 30,
+    "title": "transient waits on a provider",
+    "state": "OPEN",
+    "body": "## What to build\n\nStuff.\n\n## Blocked by\n\n- None.\n",
+    "comments": {
+      "nodes": [
+        {
+          "body": "[builder] [blocker] 🛑 blocked · ⚙️ Infra/transient\nReason tag:  ⚙️ Infra/transient\nWhy blocked: the provider timed out\nWhat blocks: a retry after the window\nOwner:       orchestrator\nblock-class: transient\nresume-when: provider-available:build\nattempts:    1\nroot-cause-hash: rc-abc123\nblocked-by:  -\n"
+        }
+      ]
+    }
+  },
+  {
+    "number": 31,
+    "title": "transient after a past instant",
+    "state": "OPEN",
+    "body": "## What to build\n\nStuff.\n\n## Blocked by\n\n- None.\n",
+    "comments": {
+      "nodes": [
+        {
+          "body": "[builder] [blocker] 🛑 blocked · ⚙️ Infra/transient\nReason tag:  ⚙️ Infra/transient\nWhy blocked: the provider timed out\nWhat blocks: a retry after the window\nOwner:       orchestrator\nblock-class: transient\nresume-when: after:2020-01-01T00:00:00Z\nattempts:    1\nroot-cause-hash: rc-abc123\nblocked-by:  -\n"
+        }
+      ]
+    }
+  },
+  {
+    "number": 32,
+    "title": "transient after a future instant",
+    "state": "OPEN",
+    "body": "## What to build\n\nStuff.\n\n## Blocked by\n\n- None.\n",
+    "comments": {
+      "nodes": [
+        {
+          "body": "[builder] [blocker] 🛑 blocked · ⚙️ Infra/transient\nReason tag:  ⚙️ Infra/transient\nWhy blocked: the provider timed out\nWhat blocks: a retry after the window\nOwner:       orchestrator\nblock-class: transient\nresume-when: after:2999-01-01T00:00:00Z\nattempts:    1\nroot-cause-hash: rc-abc123\nblocked-by:  -\n"
+        }
+      ]
+    }
+  },
+  {
+    "number": 33,
+    "title": "credential block claims transient",
+    "state": "OPEN",
+    "body": "## What to build\n\nStuff.\n\n## Blocked by\n\n- None.\n",
+    "comments": {
+      "nodes": [
+        {
+          "body": "[builder] [blocker] 🛑 blocked · 🔐 Credentials\nReason tag:  🔐 Credentials\nWhy blocked: the provider timed out\nWhat blocks: a retry after the window\nOwner:       orchestrator\nblock-class: transient\nresume-when: after:2020-01-01T00:00:00Z\nattempts:    1\nroot-cause-hash: rc-abc123\nblocked-by:  -\n"
+        }
+      ]
+    }
+  },
+  {
+    "number": 34,
+    "title": "third transient of one root cause",
+    "state": "OPEN",
+    "body": "## What to build\n\nStuff.\n\n## Blocked by\n\n- None.\n",
+    "comments": {
+      "nodes": [
+        {
+          "body": "[builder] [blocker] 🛑 blocked · ⚙️ Infra/transient\nReason tag:  ⚙️ Infra/transient\nWhy blocked: the provider timed out\nWhat blocks: a retry after the window\nOwner:       orchestrator\nblock-class: transient\nresume-when: after:2020-01-01T00:00:00Z\nattempts:    1\nroot-cause-hash: rc-abc123\nblocked-by:  -\n"
+        },
+        {
+          "body": "[builder] [blocker] 🛑 blocked · ⚙️ Infra/transient\nReason tag:  ⚙️ Infra/transient\nWhy blocked: the provider timed out\nWhat blocks: a retry after the window\nOwner:       orchestrator\nblock-class: transient\nresume-when: after:2020-01-01T00:00:00Z\nattempts:    2\nroot-cause-hash: rc-abc123\nblocked-by:  -\n"
+        },
+        {
+          "body": "[builder] [blocker] 🛑 blocked · ⚙️ Infra/transient\nReason tag:  ⚙️ Infra/transient\nWhy blocked: the provider timed out\nWhat blocks: a retry after the window\nOwner:       orchestrator\nblock-class: transient\nresume-when: after:2020-01-01T00:00:00Z\nattempts:    3\nroot-cause-hash: rc-abc123\nblocked-by:  -\n"
+        }
+      ]
+    }
+  },
+  {
+    "number": 35,
+    "title": "transient waits on a closed issue",
+    "state": "OPEN",
+    "body": "## What to build\n\nStuff.\n\n## Blocked by\n\n- None.\n",
+    "comments": {
+      "nodes": [
+        {
+          "body": "[builder] [blocker] 🛑 blocked · ⚙️ Infra/transient\nReason tag:  ⚙️ Infra/transient\nWhy blocked: the provider timed out\nWhat blocks: a retry after the window\nOwner:       orchestrator\nblock-class: transient\nresume-when: issues-closed:99\nattempts:    1\nroot-cause-hash: rc-abc123\nblocked-by:  -\n"
+        }
+      ]
+    }
+  },
+  {
+    "number": 36,
+    "title": "transient with no condition",
+    "state": "OPEN",
+    "body": "## What to build\n\nStuff.\n\n## Blocked by\n\n- None.\n",
+    "comments": {
+      "nodes": [
+        {
+          "body": "[builder] [blocker] 🛑 blocked · ⚙️ Infra/transient\nReason tag:  ⚙️ Infra/transient\nWhy blocked: the provider timed out\nWhat blocks: a retry after the window\nOwner:       orchestrator\nblock-class: transient\nattempts:    1\nroot-cause-hash: rc-abc123\nblocked-by:  -\n"
+        }
+      ]
+    }
   }
 ]

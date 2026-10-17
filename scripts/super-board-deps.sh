@@ -140,6 +140,45 @@ echo "$ISSUES" | jq --arg only "$ONLY" '
       | select(test("^[ \t]*blocked-by:"; "i")) ]
     | last // null;
 
+  # The newest Block-ish comment: the latest word on why the card is parked.
+  def block_comment:
+    [ (.comments.nodes // .comments // [])[]
+      | select( [ (.body // "") | split("\n")[]
+                  | select(test("^[ \t]*(blocked-by|block-class):"; "i")) ] | length > 0 ) ]
+    | last // null;
+
+  def line_field($body; $name):
+    [ $body | split("\n")[]
+      | select(test("^[ \t]*" + $name + ":"; "i"))
+      | sub("^[ \t]*" + $name + ":[ \t]*"; ""; "i") ] | last // null;
+
+  # block-template.md: human | dependency | transient. `transient` is only valid
+  # with the ⚙️ Infra tag; anything else that claims transient is human wall.
+  # No block-class: is backward compatible — dependency when blocked-by lists
+  # issues, human otherwise. No Block comment at all: the body governs.
+  def block_class($body):
+    (line_field($body; "block-class") // "" | ascii_downcase) as $d
+    | (line_field($body; "blocked-by") // "" | gsub("[ \t]"; "")) as $by
+    | (line_field($body; "Reason tag") // "") as $tag
+    | if $d == "transient" and ($tag | test("⚙")) then "transient"
+      elif $d == "transient" then "human"
+      elif $d == "human" or $d == "dependency" then $d
+      elif ($by | test("^[0-9]+(,[0-9]+)*$")) then "dependency"
+      else "human" end;
+
+  # The third transient block of the same root cause becomes a human decision.
+  def transient_count($body; $root):
+    if $root == "" then 0 else
+      [ (.comments.nodes // .comments // [])[]
+        | (.body // "") as $b
+        | select((line_field($b; "block-class") // "" | ascii_downcase) == "transient")
+        | select(($b | test("⚙")) and ($b | contains($root))) ] | length
+    end;
+
+  def iso_epoch:
+    if test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$") then (. + "T00:00:00Z" | fromdateiso8601)
+    else fromdateiso8601 end;
+
   def bodies: [ (.comments.nodes // .comments // [])[] | (.body // "") ];
   def label_names: [ (.labels.nodes // .labels // [])[] | (.name // "") ];
   # Index of the newest 🙋 Block comment, or null.
@@ -154,6 +193,14 @@ echo "$ISSUES" | jq --arg only "$ONLY" '
       | . as $i
       | ($i.body | section) as $sec
       | ($i | comment_line) as $cl
+      | ($i | block_comment) as $bc
+      | ($bc.body // "") as $bb
+      | (if $bc == null then "dependency" else block_class($bb) end) as $class0
+      | (line_field($bb; "root-cause-hash") // "") as $root
+      | (transient_count($bb; $root)) as $tcount
+      | (line_field($bb; "attempts") // "" | tonumber? // null) as $attempts
+      | (if $class0 == "transient" and $tcount >= 3 then "human" else $class0 end) as $class
+      | (line_field($bb; "resume-when") // "") as $rw0
       | ( if $cl != null then
             ( $cl | capture("blocked-by:[ \t]*(?<v>.*)$"; "i").v | gsub("[ \t]"; "") ) as $v
             | if $v == "-" or $v == "" then
@@ -181,12 +228,38 @@ echo "$ISSUES" | jq --arg only "$ONLY" '
             { parseable: false, blockers: [], human_gated: false,
               why: "`## Blocked by` section has no `- #N` bullets and no `- None.`" }
           end ) as $p
-      | ( [ $p.blockers[] | select(. as $b | $open | index($b)) ] ) as $stillOpen
+      | ( if $class == "dependency" then
+            (if ($rw0 | test("^issues-closed:[0-9]+(,[0-9]+)*$")) then $rw0
+             elif ($p.blockers | length) > 0 then "issues-closed:" + ($p.blockers | map(tostring) | join(","))
+             else "never" end)
+          elif $class == "transient" then
+            (if ($rw0 | test("^(issues-closed:[0-9]+(,[0-9]+)*|provider-available:[a-z]+|ci-rerun:[0-9a-fA-F]{7,40}|after:[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9:.]+Z)?)$")) then $rw0
+             else "never" end)
+          else
+            (if ($rw0 == "human-done" or $rw0 == "never") then $rw0
+             elif ((line_field($bb; "Reason tag") // "") | test("🙋")) then "human-done"
+             else "never" end)
+          end) as $resume
+      | ( if $class == "transient" and ($resume | startswith("issues-closed:"))
+            then ($resume | sub("^issues-closed:"; "") | split(",") | map(tonumber))
+            else $p.blockers end ) as $blockers
+      | ( [ $blockers[] | select(. as $b | $open | index($b)) ] ) as $stillOpen
+      | ( if $class == "dependency" then ($p.parseable and (($stillOpen | length) == 0))
+          elif $class == "transient" then
+            ( if ($resume | startswith("issues-closed:")) then (($stillOpen | length) == 0)
+              elif ($resume | startswith("after:")) then (($resume | sub("^after:"; "") | iso_epoch) <= now)
+              else false end )
+          else false end ) as $met
       | { number: $i.number, title: $i.title, state: $i.state,
-          blockers: $p.blockers, openBlockers: $stillOpen,
+          blockers: $blockers, openBlockers: $stillOpen,
           parseable: $p.parseable,
-          humanGated: $p.human_gated,
-          runnable: ($p.parseable and ($p.human_gated | not) and (($stillOpen | length) == 0)),
+          blockClass: $class,
+          resumeWhen: $resume,
+          attempts: $attempts,
+          rootCause: (if $root == "" then null else $root end),
+          escalated: ($class0 == "transient" and $class == "human"),
+          humanGated: ($class == "human"),
+          runnable: ($p.parseable and ($class != "human") and $met),
           why: $p.why,
           needsYou: ($i | needs_you),
           needsYouDone: false }
