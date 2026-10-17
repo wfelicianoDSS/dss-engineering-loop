@@ -86,10 +86,12 @@ cat > "$WORK/gh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_LOG"
 case "$1 ${2:-}" in
-  "repo view")     echo "acme" ;;
-  "issue list")    [ -z "${FAIL_DEDUPE:-}" ] || exit 1; if [ -n "${DEDUPE_HIT:-}" ]; then
-      jq -n --argjson n "$DEDUPE_HIT" '[{number:$n,body:"imports|tc-1|silent-drop OrderIntake|shallow outage|test"}]'
-    else echo '[]'; fi ;;
+  "repo view")     case "$*" in *nameWithOwner*) echo "acme/app";; *) echo "acme";; esac ;;
+  "api graphql") [ -z "${FAIL_DEDUPE:-}" ] || exit 1;
+    if [ -n "${DEDUPE_HIT:-}" ]; then
+      hits=$(jq -n --argjson n "$DEDUPE_HIT" '[{number:$n,state:"OPEN",body:"imports|tc-1|silent-drop OrderIntake|shallow outage|test"}]')
+    else hits='[]'; fi
+    echo "$hits" | jq '[{data:{repository:{issues:{totalCount:length,pageInfo:{hasNextPage:false,endCursor:null},nodes:.}}}}]' ;;
   "issue comment") [ -z "${FAIL_COMMENT:-}" ] || exit 1; exit 0 ;;
   "issue create")
     for a in "$@"; do
@@ -199,7 +201,7 @@ rm -f "$SB_GITHUB_HALT_FILE"
 OUT=$(FAIL_DEDUPE=1 run --title "Read outage" --body-file "$WORK/good.md" --fingerprint "outage|test"); RC=$?
 is "three failed dedupe reads halt" 79 "$RC"
 case "$(cat "$GH_LOG")" in *"issue create"*|*"issue comment"*) bad "unreadable dedupe never writes" "no writes" "write attempted" ;; *) ok "unreadable dedupe never writes" ;; esac
-is "three dedupe attempts" 3 "$(grep -c '^issue list' "$GH_LOG")"
+is "three dedupe attempts" 3 "$(grep -c '^api graphql' "$GH_LOG")"
 rm -f "$SB_GITHUB_HALT_FILE"
 OUT=$(FAIL_COMMENT=1 DEDUPE_HIT=301 run --title "Write outage" --body-file "$WORK/good.md" --fingerprint "outage|test"); RC=$?
 is "uncertain comment outcome halts" 79 "$RC"

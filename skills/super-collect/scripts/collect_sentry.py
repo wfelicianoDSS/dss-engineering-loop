@@ -71,6 +71,8 @@ def api(st, path, params=None, retries=5):
                 time.sleep(min(wait, 60))
                 continue
             raise SentryError(f"Sentry API HTTP {e.code} on {path}") from None
+        except (urllib.error.URLError, OSError) as e:  # DNS, refused, timeout
+            raise SentryError(f"Sentry unreachable on {path}: {getattr(e, 'reason', e)}") from None
     raise SentryError(f"Sentry API gave up on {path}")
 
 

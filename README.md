@@ -9,7 +9,7 @@
 <p>8 skills (5 you type, 3 the board runs) · 9 commands · 6 guard hooks</p>
 
 <p>
-<img alt="Version" src="https://img.shields.io/badge/version-3.1.1-1f883d?style=flat-square">
+<img alt="Version" src="https://img.shields.io/badge/version-3.1.2-1f883d?style=flat-square">
 <img alt="Host" src="https://img.shields.io/badge/Claude%20Code-skills-d97757?style=flat-square">
 <img alt="License" src="https://img.shields.io/badge/license-MIT-0969da?style=flat-square">
 </p>
@@ -40,6 +40,11 @@ Or as a Claude Code plugin:
 
 > [!NOTE]
 > The plugin ships the skills only. Run `/super-board:super-board onboard` and its 🔍 Checks step adds the guard hooks, scripts and workflows. Needs Claude Code, `gh`, `jq`, bash 3.2+ and Python 3.9+; the installer checks.
+
+Optional post-run learning can delegate an already installed `calibrate` skill after
+verified selected work completes. It applies only to explicitly permitted existing
+canonical skill files; the package bundles no private skill. See
+[post-run calibration](skills/super-board/references/calibration.md).
 
 ## Quick start
 
@@ -125,7 +130,7 @@ Run automatically once installed. Python stdlib, JSON in, JSON out.
 | [guard-protected-push](hooks/guard-protected-push.py) | Opt-in (`onboard` asks, or `install.sh --protect-main`): blocks direct and force pushes to main/master/base |
 | [README sync](scripts/super-board-readme-sync.py) | Regenerates the skill table; pre-commit and PostToolUse hooks keep it fresh |
 | [cleanup-wt](hooks/cleanup-wt.py) | Removes merged worktrees and branches after each merge and at session start, with a recovery file |
-| [merge gate](scripts/super-board-merge-gate.sh) | Merges only after the current base plus your `verify_commands` pass, pinned to the reviewed commit; applies `merge_policy` and runs allowed DB migrations |
+| [merge gate](scripts/super-board-merge-gate.sh) | Merges only after the current base plus your non-empty project `verify_commands` pass (missing checks halt setup), pinned to the reviewed commit; applies `merge_policy` and runs allowed DB migrations |
 
 ## Models
 
@@ -173,8 +178,27 @@ MIT © Eric Tech ([LICENSE](LICENSE)). Built on [obra/superpowers](https://githu
 <a href="https://erictechpro.github.io/super-board/writing-standard/">Writing standard</a> ·
 <a href="https://erictechpro.github.io/super-board/onboarding/">Setup simulator</a> ·
 <a href="https://erictechpro.github.io/super-board/impeccable/">Impeccable map</a> ·
+<a href="https://erictechpro.github.io/super-board/pstack/">pstack map</a> ·
 <a href="RELEASE-NOTES.md">Release notes</a> ·
 <a href="RELEASING.md">Release checks</a> ·
 <a href="https://youtu.be/nX_bGyIOFM4">YouTube walkthrough</a>
 </p>
 <p align="center"><sub>Made by Eric Tech</sub></p>
+
+### Worker skill availability
+
+Setup and dispatch resolve real, nonempty `SKILL.md` files for the actual
+Claude or Codex host. Missing required skills halt before claims or workers;
+lockfiles and arbitrary plugin caches do not count. The shared registry in
+`scripts/super-board-skills-ready.py` owns lane dependencies, overrides and the
+two declared ponytail fallbacks. Setup's full helper union may be red while a
+selected card is runnable. Read-only checks never install; explicit onboard
+repair rechecks files after installation.
+
+The CLI accepts `--home <fixture-home>` and `--catalog <active-skills.json>`.
+Launchers accept the same inventory through `SUPER_BOARD_SKILLS_HOME` and
+`SUPER_BOARD_SKILLS_CATALOG`; neither changes the actual host. Catalog shape:
+`{"host":"codex","skills":[{"name":"vendor:skill","path":"/exact/SKILL.md",
+"enabled":true,"scope":"project","project_root":"/exact/project"}]}`.
+User entries use `scope:"user"`. Restart explicitly after repairing missing
+skills; readiness certifies availability, not their content or external tools.

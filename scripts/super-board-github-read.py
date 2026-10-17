@@ -203,6 +203,26 @@ def validate(text, kind, meta=None):
                         and isinstance(n.get('title'), str) and n.get('state') == 'OPEN'
                         and isinstance(n.get('comments', {}).get('nodes'), list)
                         and isinstance(n.get('labels', {}).get('nodes'), list) for n in nodes), 'dependency issue fields missing')
+    elif kind == 'issue-history':
+        require(isinstance(value, list) and bool(value), 'issue history pages missing')
+        numbers, cursors, total = set(), set(), None
+        for index, page in enumerate(value):
+            connection = page['data']['repository']['issues']
+            nodes, info, count = connection['nodes'], connection['pageInfo'], connection['totalCount']
+            require(type(count) is int and count >= 0 and (total is None or total == count), 'issue count changed during pagination')
+            total = count
+            require(isinstance(nodes, list) and type(info['hasNextPage']) is bool, 'issue history page malformed')
+            require(info['hasNextPage'] == (index < len(value) - 1), 'issue history pagination incomplete')
+            if info['hasNextPage']:
+                cursor = info.get('endCursor')
+                require(isinstance(cursor, str) and cursor and cursor not in cursors, 'issue history cursor repeated/missing')
+                cursors.add(cursor)
+            for node in nodes:
+                require(isinstance(node, dict) and type(node.get('number')) is int and node['number'] > 0
+                        and node['number'] not in numbers and node.get('state') in ('OPEN', 'CLOSED')
+                        and isinstance(node.get('body'), str), 'issue history fields missing/duplicate')
+                numbers.add(node['number'])
+        require(len(numbers) == total, 'issue history count incomplete')
     elif kind == 'quota':
         resources = value['resources']
         for bucket in ('graphql', 'core'):
@@ -213,7 +233,10 @@ def validate(text, kind, meta=None):
     elif kind == 'project':
         require(isinstance(value, dict) and isinstance(value.get('id'), str) and value['id'], 'project ID missing')
     elif kind == 'fields':
-        require(isinstance(value.get('fields'), list) and any(f.get('name') == 'Status' and f.get('id') and isinstance(f.get('options'), list) for f in value['fields']), 'Status field missing')
+        require(isinstance(value.get('fields'), list) and any(isinstance(f, dict) and f.get('name') == 'Status' and f.get('id') and isinstance(f.get('options'), list) for f in value['fields']), 'Status field missing')
+        status = next(f for f in value['fields'] if f.get('name') == 'Status')
+        require(all(isinstance(o, dict) and isinstance(o.get('id'), str) and o['id']
+                    and isinstance(o.get('name'), str) and o['name'] for o in status['options']), 'Status option identity missing')
     elif kind == 'status-field':
         data = value['data']
         owner = data.get('user') or data.get('organization')
@@ -318,7 +341,8 @@ def read(args, kind='json', meta=None, recovering=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--kind', choices=('json','scalar','issue-number','head','state','diff','metadata','items','issues','quota','projects','project','fields','status-field','permission','comments','approval','merge-state','body','dedupe','prs-open','prs-merged','issues-closed','issue','object','array'))
+    parser.add_argument('--kind', choices=('json','scalar','issue-number','head','state','diff','metadata','items','issues','issue-history','quota','projects','project','fields','status-field','permission','comments','approval','merge-state','body','dedupe','prs-open','prs-merged','issues-closed','issue','object','array'))
+    parser.add_argument('--issue-history', help='complete paginated all-state issue history for owner/name')
     parser.add_argument('--meta')
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--halt', help='record an unresolved mutation outcome and stop; never retry it')
@@ -350,6 +374,13 @@ def main():
             return 0
         if args.check:
             check_halt()
+            return 0
+        if args.issue_history:
+            require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.issue_history) is not None, 'issue history requires owner/name')
+            owner, repo = args.issue_history.split('/')
+            query = 'query($owner:String!,$repo:String!,$endCursor:String){repository(owner:$owner,name:$repo){issues(first:100,after:$endCursor,states:[OPEN,CLOSED]){totalCount pageInfo{hasNextPage endCursor} nodes{number state body}}}}'
+            _, pages = read(['api','graphql','--paginate','--slurp','-f','query='+query,'-F','owner='+owner,'-F','repo='+repo], 'issue-history')
+            print(json.dumps([n for page in pages for n in page['data']['repository']['issues']['nodes']]))
             return 0
         meta = json.loads(Path(args.meta).read_text()) if args.meta else None
         output, _ = read(command, args.kind or 'json', meta)

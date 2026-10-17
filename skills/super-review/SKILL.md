@@ -3,6 +3,11 @@ name: super-review
 description: Reviewer lane of the super-board pipeline and standalone PR/branch readiness review — forms its own hypotheses before reading the builder's summary, remembers prior findings and re-checks each with file:line proof, runs an adversarial truth-check on non-trivial diffs, and classes every finding (Gap, Bug, Verification miss, Scope drift, Over-engineering via `ponytail:ponytail-review`). Merges only through `super-board-merge-gate.sh`, pinned to the reviewed head SHA, and routes other fixes to Super Build or Super QA via the board. Use when the user says "Super Review", "review this branch", "review loop", "make sure this is merge-ready", "PR review", or asks for code, architecture, security, QA evidence, or release-readiness judgment.
 ---
 
+
+**For a board worker, before writes or worktree creation:** follow [skill readiness](../super-board/references/skills-readiness.md).
+Resolve this lane for the actual host, load the report's files/fallbacks, halt
+on missing requirements and recheck each conditional helper before use.
+
 # Super Review — PR/code readiness reviewer
 
 **Super Review** is the super-board reviewer. It checks whether a branch or PR is safe to merge, records actionable findings, and routes fixes to the right Super workflow.
@@ -229,6 +234,7 @@ Super Review is done when one of these is true:
 - all unresolved findings are explicitly human-gated;
 - required evidence cannot be collected because tooling/service access is unavailable, and the output clearly marks the result as unverified.
 
+
 ## Skill dependencies
 
 The reviewer loads three skills, all scoped to the diff:
@@ -314,6 +320,11 @@ See `.claude/skills/super-board/references/run.md` → Reviewer. Summary of the 
    - Pull `issue-<N>-<slug>` into review worktree.
    - Re-run the EXACT command from Tester's PR `Local tests:` line.
    - Green → continue. Red → open new `[qa]`-prefixed thread quoting failure, move card Review → QA with `loop:rebuild-N`, exit.
+   - If QA includes `Runtime checks:`, follow
+     [optional runtime verification](../super-qa/references/runtime-verification.md):
+     rerun the same scenario/config and pinned versions into new review evidence,
+     check hashes/revisions and performance AC budgets. Never infer a speed win
+     from exit 0 or an inconclusive result. Runtime checks supplement local tests.
 6. **Adversarial mode** (per `config.truth_gate` — `off` / `non-trivial` / `always`, default `non-trivial`): see section below.
 7. Decide per finding. First apply the Over-engineering rule to every finding collected —
    yours, `ponytail:ponytail-review`'s and the truth-check sub-agents': Over-engineering is
@@ -342,6 +353,7 @@ two complete builds. In order, no shortcuts:
    commit bullets and `Closes #N` — writing-standard.md § 1). Exit 6 = the head moved after review → your evidence is void;
    leave the card in **Review** with a `[reviewer]` comment naming both shas.
    The gate owns the merge decision (config `merge_policy`, `migrations`):
+   - **Exit 9 — verification-readiness.** Halt the run; preserve card, approval, claims, and worktree. Configure `verify_commands` with the owning project's real checks and restart explicitly. No bounce to Build, rebase retry, approval request, or bare merge.
    - **Exit 7 — a human merges.** `merge_policy` matched (money / auth / schema label,
      path or added-line keyword; a diff over `auto_max_lines`, default 400 — "big PR — please
      review"; `default: "human"`). `schema` means destructive only (DROP / TRUNCATE / RENAME);

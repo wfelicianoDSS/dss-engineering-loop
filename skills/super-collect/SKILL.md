@@ -21,6 +21,13 @@ config and files onto that project's board.
 
 Default is **dry-run**: show the plan table, file on confirm.
 
+## Scheduler integration
+
+For periodic intake, use [scheduled-intake.md](references/scheduled-intake.md):
+let the owner's scheduler invoke this existing skill, retain source verification
+and holding-column-only filing, and notify only on meaningful changes or failures.
+No job, cadence or scheduler is created by this skill.
+
 ## Setup
 
 1. Resolve the config: `.claude/super-board/active` → `.claude/super-board/configs/<slug>.json`
@@ -29,7 +36,7 @@ Default is **dry-run**: show the plan table, file on confirm.
 2. Secrets come only from `.env` (nearest walking up): `SENTRY_AUTH_TOKEN`,
    `POSTHOG_PERSONAL_API_KEY`. Never print, echo or paste them.
 3. Source `.claude/bin/super-board-gh-guard.sh`; `sb_gh_guard_check 200` before each gh burst.
-4. Snapshot the board once: `gh project item-list <number> --owner <owner> --format json --limit 500`.
+4. Snapshot the board through `.claude/bin/super-board-github-read.py --kind items -- project item-list <number> --owner <owner> --format json --limit 500`. A count mismatch or read failure halts; never treat a partial board as complete.
    It is the dedupe set for verification and the "not on the board" set for `github`.
 
 Scripts live in `.claude/skills/super-collect/scripts/` (`S=` below). Every fetcher takes
@@ -43,7 +50,7 @@ Scripts live in `.claude/skills/super-collect/scripts/` (`S=` below). Every fetc
 |---|---|---|
 | `sentry` | `python3 $S/collect_sentry.py list --since <w>` — Sentry REST, Bearer token (scopes `event:read project:read`): org issues list, then `event <id>` / `tags <id>` for evidence | one unresolved issue → `bug`, fp `err|sentry|<id>` |
 | `posthog` | `python3 $S/collect_posthog.py list --since <w>` — HogQL `POST {host}/api/projects/{id}/query/` | one signal group → see table below |
-| `github` | `gh issue list --state open --json number,title,body,labels,url --limit 300`, minus issues on the board and `source:*` labels | real work → **adopt** (`--adopt <n>`), never copied |
+| `github` | Read open candidates with `gh issue list --state open --json number,title,body,labels,url --limit 300` (a full 300 is capped coverage, not a complete repo inventory), minus issues on the board and `source:*` labels | real work → **adopt** (`--adopt <n>`), never copied |
 | `prs` | `python3 $S/collect_prs.py list --since <w>` — one GraphQL search `is:pr is:merged merged:>=DATE`, paginated, with comments, reviews and review threads (human and bot), super-review reports flagged (`<!-- super-review:report -->`) | one recurring root cause → `fix` / `refactor` / `feature`, fp `prs|<boundary>|<cause>` |
 | `architecture` | read-only finder sub-agent (below) | one finding → `refactor`, fp `arch|<module>|<problem>` |
 | custom (`collect.custom[]`) | `python3 $S/collect_custom.py list --since <w>` — http and cli sources run in the script; an `mcp` source comes back `status: agent`: call that server's read/list tool yourself (read-only), then pipe its JSON into `collect_custom.py normalize --name <n>` | one candidate → `bug` (errors, incidents) or `feature` (requests), `--source custom`, fp `custom|<name>|<key>` (the script emits it) |
@@ -98,8 +105,9 @@ Read the JSON for problems that **recur**, not one-off nits:
 
 Cluster by **root cause at a shared boundary**, not by wording. One ticket per cause with
 Problem, Context, Evidence (every PR, comment link and finding id), Fix (names the root cause),
-Acceptance Criteria, Risk — at least one criterion is a regression check that would have caught
-the recurrence.
+Acceptance Criteria, Risk. Before proposing Fix and its behavioral AC, follow
+[correction prevention](references/correction-prevention.md): identify what permitted the
+recurrence, prefer a fitting structural correction, and retain the actual prior bad witness.
 
 ### architecture — the finder
 
@@ -145,7 +153,8 @@ $S/super-collect-file.sh --config <cfg> --adopt <n> --type <t> [--yes]
 ```
 
 - `bug`, `feature`, `fix` → `super-qa-file-bug.sh` (`fix` files as `tech-debt`); `refactor` →
-  `super-review-file-refactor.sh`. Every body uses the ticket format in
+  `super-review-file-refactor.sh`. `--title` is the bare problem: the filers add the
+  `<emoji> [<kind>] <scope>:` prefix, so never pass one (`🐛 [bug] …` would appear twice). Every body uses the ticket format in
   `.claude/skills/super-board/references/writing-standard.md` § 3: Problem · Context (lettered
   steps under Where) · Fix · Acceptance Criteria (checklist) · Risk; bugs add the folded 12-row
   Evidence table (a missing row says `n/a — why`), fixes add an Evidence section. Evidence is
@@ -153,10 +162,11 @@ $S/super-collect-file.sh --config <cfg> --adopt <n> --type <t> [--yes]
 - **Fingerprint per source** (the filer rejects a mismatch): sentry `err|sentry|<id>`, posthog
   `posthog|<signal>|<key>` (fetchers emit it) or `gap|<workflow>`, github `github|<n>`, prs
   `prs|<boundary>|<cause>`, architecture `arch|<module>|<problem>`, custom `custom|<name>|<key>`.
-- **Dedupe** is exact-fingerprint, repo-wide, any label: an open hit gets a "Seen again" comment; a
+- **Dedupe** uses complete guarded paginated issue history, exact-fingerprint, repo-wide, any label: an open hit gets a "Seen again" comment; a
   closed-only hit is a **recurrence**, filed again naming the closed issue.
 - **Column** is the board's holding column (`Backlog`, else `Todo`/`To do`/`Triage`/`Inbox`); none
   → refused (exit 65).
+- The same-host repository lock serializes collector calls; digest receipts skip identical repeat comments. See [state and recovery](references/scheduled-intake.md).
 - Labels: `source:collect`, `collect:<source>`, every `--label`, plus the filer's own.
 
 Dry-run: run each verified item without `--yes`, show one table (`would-file` / `duplicate` /

@@ -81,8 +81,13 @@ python3 "$GITHUB_READ" --check || exit $?
 # The fingerprint is stamped into the body as an HTML comment so it survives
 # edits to the prose and stays invisible on the rendered issue.
 STAMP="<!-- super-review-fingerprint: ${FINGERPRINT} -->"
-ISSUES_JSON=$(python3 "$GITHUB_READ" --kind dedupe -- issue list "${REPO_FLAG[@]}" --label "source:review" --state open --limit 200 --json number,body) || exit $?
-EXISTING=$(printf '%s' "$ISSUES_JSON" | jq -r --arg fingerprint "$FINGERPRINT" '[.[] | select(.body | contains($fingerprint)) | .number] | first // empty')
+REPO_NAME="${REPO_FLAG[1]:-}"
+if [ -z "$REPO_NAME" ]; then
+  REPO_NAME=$(python3 "$GITHUB_READ" --kind scalar -- repo view --json nameWithOwner --jq .nameWithOwner) || exit $?
+fi
+ISSUES_JSON=$(python3 "$GITHUB_READ" --issue-history "$REPO_NAME") || exit $?
+EXISTING=$(printf '%s' "$ISSUES_JSON" | jq -r --arg fingerprint "$FINGERPRINT" '[.[] | select(.state == "OPEN" and any(.body | splits("\\s+"); . == $fingerprint)) | .number] | first // empty')
+
 
 if [ -n "$EXISTING" ]; then
   # Same shape problem, seen again on a later PR. Add the sighting, don't stack cards.

@@ -6,6 +6,18 @@ Config schema and field notes: `config-schema.json`. Loaded by `SKILL.md` for `s
 Invoked as `/super-board onboard` (get.sh / install.sh) or `/super-board:super-board onboard`
 (plugin install — skill names carry the plugin prefix).
 
+## Host-visible skill checks
+
+Checks use `.claude/bin/super-board-skills-ready.py --profile setup --host
+<claude|codex>` and show `helper_readiness`: exact files, declared fallbacks,
+optional skips and missing names. Setup checks the unconditional union; a
+selected card may need fewer helpers. Node or `skills-lock.json` never proves
+readiness. `check` and dispatch install nothing. Explicit `fix` retains helper
+installation, then re-resolves actual files; an installer exit of zero alone is
+not success. `--no-helpers` suppresses that repair attempt, not missing evidence.
+A host plugin inventory may be supplied with `--catalog <active-skills.json>`;
+only enabled entries applying to this project count.
+
 ## Design rules
 
 | Rule | How |
@@ -125,11 +137,18 @@ Write it atomically (temp file + rename) after every answer. A halt never loses 
    ├─ collect signals: Sentry (@sentry/* / sentry-sdk in manifests, Sentry.init(, .sentryclirc),
    │    PostHog (posthog-js / posthog-node / posthog, posthog.init(, NEXT_PUBLIC_POSTHOG_* names);
    │    key names: bash $SB/super-board-env-check.sh SENTRY_AUTH_TOKEN POSTHOG_PERSONAL_API_KEY
+   ├─ verification commands: preserve valid `verify_commands`; otherwise inspect the owning
+   │    project's documented checks and stage those commands. Unresolved checks are a setup
+   │    halt. Never save placeholders or invent a universal runner.
+   ├─ project verifier: detect `.agents/skills/verify-*/SKILL.md` and feature maps.
+   │    For creation or upkeep read `../../super-qa/references/project-verifier.md`;
+   │    stage real project checks only when source names accepted features. Optional
+   │    verifier gaps never replace or block the required verification commands.
    └─ machine time zone for config `timezone`: $TZ, else readlink /etc/localtime | sed
       's#.*zoneinfo/##', else timedatectl show -p Timezone --value, else "UTC". Shown at step 8.
 
 1. 🔍 CHECKS — nothing asked except system tools and sign-ins
-   ├─ python3 $SB/super-board-setup.py fix --text
+   ├─ python3 $SB/super-board-setup.py fix --host <actual-worker-host> --text
    │    Fixes with NO question, backed up first to .claude/super-board/backup/<ts>/:
    │    skills, .claude/bin scripts, workflows, guard hooks + settings.json entries (runs the
    │    pack's install.sh), removes old skill folders (super-refine, cleanup-wt, arch-loop),
@@ -143,11 +162,12 @@ Write it atomically (temp file + rename) after every answer. A halt never loses 
    │        ✓ git repo found
    ├─ Each `needs` item (a system tool): one line, then run its `command` with Bash — Claude
    │    Code's permission prompt IS the question. No AskUserQuestion.
-   │      Needs your machine: Node.js isn't installed. It's needed for Matt Pocock's coding
+   │      Needs your machine: Node.js isn't installed. It's needed for the helper installer; actual coding
    │      skills (tests, code review, debugging) the board uses.
    │      → Bash(brew install node && npx -y skills@latest add mattpocock/skills)
    │    The command is per OS (brew / apt / dnf / winget) and comes from the script.
-   │    Declined: node → the board runs with built-in checklists instead (say so, continue);
+   │    Declined: node → report exact missing skills and keep readiness red; existing resolved
+   │    helpers still count, but missing required helpers halt dispatch;
    │    git or gh → halt: "Without <tool> the board can't <why>. Your answers are saved — run
    │    the command, then re-run onboard."
    ├─ Re-check (`check --text`) after every install; move on only when it says all green.
@@ -331,13 +351,16 @@ Write it atomically (temp file + rename) after every answer. A halt never loses 
    │      Board    Ledgerly Roadmap #4 (+QA)    Branch   staging (new)
    │      Rules    safe defaults                Perms    7 lines
    │      AGENTS   rules moved, CLAUDE.md→@     Sources  sentry, github, prs, arch, linear
+   ├─ Existing or staged project verifier: list skill/map/runner paths and state
+   │    `starter, not run` or the actual selected-feature proof. Preserve human-owned
+   │    critical paths and flows; missing source leaves this optional helper absent.
    ├─ AskUserQuestion "Write everything?" (header "Save") [Write everything (Recommended) /
    │    Change one thing → pick the step, walk only it, back here / Cancel — nothing written].
    ├─ Write, in order (each atomic; stop and report on the first failure — answers are kept):
    │    ├─ .claude/super-board/configs/<slug>.json (committed): description, project, target
    │    │    {type: repo | repo+url}, repo, base_branch, timezone, columns (the seven), labels,
    │    │    paths, merge_policy, migrations, collect (incl. custom), notifications {channel:
-   │    │    "session", bot_identity}, worker_backend "workflow". No `variant`.
+   │    │    "session", bot_identity}, worker_backend "workflow", verify_commands (non-blank project checks). No `variant`.
    │    ├─ .claude/super-board/active ← <slug>
    │    ├─ .gitignore += .claude/super-board/active, onboard-answers.json, onboard-staged/,
    │    │    backup/, inflight/, migrations/, upgrade.json (all under .claude/super-board/)
@@ -345,11 +368,15 @@ Write it atomically (temp file + rename) after every answer. A halt never loses 
    │    │    super-board-settings.py hooks .claude/settings.json <pack>/hooks/settings-protect-main.json
    │    ├─ AGENTS.md / CLAUDE.md: super-board-agents-md.py backup, then write --src <staged>
    │    │    --dest AGENTS.md, pointer --tail <staged tail> --force, block, check
+   │    ├─ staged project verifier skill/map/scenarios/runner, if source-backed; then
+   │    │    inspect the saved map and resolve the local skill for the actual host.
    │    └─ docs/agents/issue-tracker.md; docs/super-board/PROJECT.md (a sub-agent drafts it from
    │       manifests + README + tree, no question; listed in the table as "PROJECT.md drafted")
    └─ Delete onboard-staged/; keep the answers file (re-runs use it).
 
-DONE — self-check, then the ONE place that names the next command:
+DONE — run `python3 $SB/super-board-verification-ready.py --config <saved config>`;
+      exit 9 reports setup incomplete (repair checks before run; do not reinstall/rebase).
+      Then self-check, then the ONE place that names the next command:
       ⏺ Bash(self-check)  ⎿  all good
       ⏺ 🎉 Onboard complete.
         📋 Board: github.com/users/<owner>/projects/<n> (<title>)
@@ -422,7 +449,7 @@ answers are kept and it resumes at <step>".
 |---|---|---|
 | 1 | Pack files not found (plugin) | `🛑 Can't find the super-board plugin files. Run the one-line installer (get.sh) or ./install.sh <this-dir> from a checkout, then re-run onboard.` |
 | 1 | A tool install declined (git, gh) | `Without <tool> the board can't <why>. Your answers are saved — run <command>, then re-run onboard.` |
-| 1 | Node declined, or `npx skills add` fails | `⚠️ Matt Pocock's skills aren't installed — lanes use built-in checklists. Later: <command>.` Continues. |
+| 1 | Node declined, or `npx skills add` fails | `⚠️ Required worker skills remain unavailable: <exact names>. Install for <host> and restart.` Setup stays red; dispatch halts before claims. |
 | 1 | Workflow still fails `node --check` after the re-copy | `🛑 .claude/workflows/super-board-wave.js is corrupt. Re-run ./install.sh <this-dir> — don't hand-edit it.` |
 | 1 | settings.json invalid JSON | `✋ .claude/settings.json is not valid JSON; I left it untouched. Fix it, then re-run — only the settings entries repeat.` |
 | 2 | Scope refused in the browser | `🔑 GitHub asked for project,read:project,repo and you said no. Without them I can't read or move cards. Re-run: gh auth refresh -s project,read:project,repo.` |
@@ -469,3 +496,9 @@ remove a pending recovery record; use its saved state to reconcile a conflict be
 When step 5 wrote files: `super-board-agents-md.py check --file AGENTS.md` passes and `detect`
 reports CLAUDE.md as a pointer (unless "Only add the super-board section"). Any check fails →
 no 🎉: name the failed check and say "re-run `/super-board onboard` — it resumes there".
+
+## Project-owned verification checks
+
+Use [project-checks.md](project-checks.md) to connect existing lint, layout, import
+and test commands through `verify_commands`. Examples are app-owned; onboarding
+does not impose an architecture or install a universal linter.

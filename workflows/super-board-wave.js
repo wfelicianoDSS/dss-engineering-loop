@@ -52,7 +52,7 @@ const READ_SHAPES = [
   `- issue state: --kind state -- issue view <N> --json state --jq .state`,
   `A read whose output misses its shape exits 64 for that call only and prints the valid form: fix the read, do not halt.`,
 ].join('\n')
-const READ_FAILURE = READ_SHAPES + '\n' + `Required GitHub reads use .claude/bin/super-board-github-read.py: three total attempts, exit 79 means run halted. Check --check before any GitHub write, migration, or merge. On exit 79 preserve worktree/card/approval/claims, make no more GitHub calls, and report status=halted (preflight verdict=halted). Never retry a mutation. Config: ${input.configPath}.`
+const READ_FAILURE = READ_SHAPES + '\n' + `Verification-readiness exit 9 means missing/unusable config.verify_commands: preserve card/worktree/approval/claims, report status=halted (preflight verdict=halted), stop dispatch, repair project configuration before explicit restart; no Build bounce or automatic retries. ` + `Required GitHub reads use .claude/bin/super-board-github-read.py: three total attempts, exit 79 means run halted. Check --check before any GitHub write, migration, or merge. On exit 79 preserve worktree/card/approval/claims, make no more GitHub calls, and report status=halted (preflight verdict=halted). Never retry a mutation. Config: ${input.configPath}.`
 
 const CLASSIFY_SCHEMA = {
   type: 'object',
@@ -134,7 +134,17 @@ const BOARD_IO = () =>
   `Board moves and reads: .claude/bin/super-board-card.sh --config ${input.configPath} move <issue> <Status> ` +
   `(1 GraphQL point) · status <issue> · items. Comments, labels, PR reads: REST per .claude/skills/super-board/references/rate-limit-etiquette.md → "Price list". Read GitHub once per decision, never in a sleep loop.`
 
+// The orchestrator resolves every remaining chain before claims. The runtime has
+// no subprocess API; each worker repeats the deterministic CLI before its writes.
+const SKILLS_CHECK = (cards, lane) => [
+  `First operation, before worktree creation, classification, comments, labels or moves: run python3 .claude/bin/super-board-skills-ready.py --root "$PWD" --host claude --cards - --hydrate${lane ? ' --lane ' + lane : ''},`,
+  `with this JSON array as stdin (data, never interpolate a body into shell code): ${JSON.stringify(cards)}.`,
+  `Exit 10 means status=halted (preflight verdict=halted), detail beginning "skills-readiness:"; preserve all existing claims/worktrees/approval evidence. Exit 64 means invalid input: halt and repair it. Exit 79 uses the read halt policy.`,
+  `Load the exact resolved_path files. Only declared fallback IDs are allowed. Before using a conditional/custom helper repeat this CLI with --require <exact-name>.`,
+].join('\n')
+
 const lanePrompt = (lane, card) => [
+  SKILLS_CHECK([card], lane),
   READ_FAILURE,
   `Run ${LANE[lane].skill} on issue #${card.number} ("${card.title}") for a super-board workflow wave.`,
   `Read .claude/skills/super-board/references/run.md → "${LANE[lane].section}" lifecycle and follow it EXACTLY:`,
@@ -151,7 +161,7 @@ const lanePrompt = (lane, card) => [
   `- status=advanced  → card moved forward (Building→QA, QA→Review, Review→Done/merged)`,
   `- status=bounced   → card moved backward (QA fail → Ready, Reviewer bounce → Ready/QA)`,
   `- status=blocked or human-gate → you wrote the Block template and moved the card to Blocked`,
-  `- status=halted    → required service evidence is unavailable; leave card state unchanged and stop the run`,
+  `- status=halted    → required service evidence or verification configuration is unavailable; leave card state unchanged and stop the run`,
   `- status=failed    → you could not complete the lifecycle (say why in detail)`,
   `column = the column the card is in when you exit. detail = one line. Include prUrl/branch when they exist.`,
 ].join('\n')
@@ -175,7 +185,7 @@ const classifyModel = (input.tier || 'medium') === 'high' ? 'sonnet' : 'haiku'
 
 const runLane = async (lane, card, model, history) => {
   if (halted) {
-    const result = { status: 'halted', column: card.status, detail: 'run halted by a required GitHub read failure' }
+    const result = { status: 'halted', column: card.status, detail: 'run halted; preserve work and repair the reported readiness or evidence problem' }
     history.push({ lane, ...result })
     return result
   }
@@ -224,6 +234,7 @@ const PREFLIGHT_SCHEMA = {
 const PREFLIGHT_BATCH = 5
 const preflightModel = (input.tier || 'medium') === 'low' ? 'haiku' : 'sonnet'
 const preflightPrompt = (batch) => [
+  SKILLS_CHECK(batch),
   READ_FAILURE,
   `Builder pre-flight for issues ${batch.map((c) => `#${c.number} ("${c.title}")`).join(', ')}. Config: ${input.configPath}.`,
   `Read .claude/skills/super-board/references/run.md → "Builder pre-flight" and follow it EXACTLY. You write no code.`,
@@ -283,12 +294,12 @@ const results = await pipeline(
     const labels = labelsOf(card)
     const typed = ['qa', 'bug', 'feature'].find((l) => labels.includes(l))
     const cls = await agent(
-      READ_FAILURE + '\n' + `Read GitHub issue #${card.number} ("${card.title}") — body (--kind issue) and all comments (--kind comments) — with the read shapes above. ` +
+      SKILLS_CHECK([card]) + '\n' + READ_FAILURE + '\n' + `Read GitHub issue #${card.number} ("${card.title}") — body (--kind issue) and all comments (--kind comments) — with the read shapes above. ` +
       `Classify it: kind (feature|bug|qa) and complexity (low|medium|high) judged by the scope of change required. ` +
       (typed
         ? `Its label says "${typed}": return kind "${typed}" — the label routes the card, you never override it.`
         : `It has no type label, so it is built (no label = Building). Return feature or bug — never qa, ` +
-          `which only a person sets — and add that label: gh issue edit ${card.number} --add-label <kind>.`),
+          `which only a person sets. Existing docs/ux/tests/refactor/tech-debt rows keep their label chain: classify complexity without adding feature/bug. For a truly untyped card, re-run skills-ready against a copy of this card with the proposed label before any label write, then add that label: gh issue edit ${card.number} --add-label <kind>.`),
       { label: `classify:#${card.number}`, phase: 'Classify', model: classifyModel, schema: CLASSIFY_SCHEMA }
     )
     if (cls && cls.status === 'halted') halted = true

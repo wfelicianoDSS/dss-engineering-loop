@@ -6,6 +6,18 @@ KIT=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin" "$T/repo"
 git init -q "$T/repo"
+python3 "$KIT/tests/fixtures/install_worker_skills.py" "$T/repo"
+export SUPER_BOARD_SKILLS_HOME="$T/home"; mkdir -p "$SUPER_BOARD_SKILLS_HOME"
+cat > "$T/bin/gh" <<'PYGH'
+#!/usr/bin/env python3
+import json,sys
+args=sys.argv[1:]
+if args[:2]==['issue','view']:
+    print(json.dumps({'labels':[]} if args[args.index('--json')+1] == 'labels' else {'number':int(args[2]),'title':'fixture','body':''}))
+else:
+    sys.exit('unexpected gh fixture call: '+str(args))
+PYGH
+chmod +x "$T/bin/gh"
 export SB_CODEX_TEST_LOG="$T/calls.jsonl"
 export PATH="$T/bin:$PATH"
 cat > "$T/bin/codex" <<'PY'
@@ -40,7 +52,7 @@ column = {'build':'QA', 'qa':'Review', 'review':'Done'}[lane] if status == 'adva
 if os.environ.get('SB_CODEX_TEST_INVALID'):
     output.write_text('not json')
 else:
-    output.write_text(json.dumps(dict(status=status, column=column, detail='stub lane result', prUrl=None, branch=None, priorFindings=None)))
+    output.write_text(json.dumps(dict(status=status, column=column, detail=os.environ.get('SB_CODEX_TEST_DETAIL', 'stub lane result'), prUrl=None, branch=None, priorFindings=None)))
 print('codex log noise must not appear in result stdout')
 with open(os.environ['SB_CODEX_TEST_LOG'], 'a') as log:
     fcntl.flock(log, fcntl.LOCK_EX)
@@ -49,7 +61,7 @@ sys.exit(int(os.environ.get('SB_CODEX_TEST_EXIT', '0')))
 PY
 chmod +x "$T/bin/codex"
 cd "$T/repo"
-echo '{}' > "$T/config.json"
+echo '{"verify_commands":["git diff --check"]}' > "$T/config.json"
 CARD='{"number":1,"status":"Ready","title":"example"}'
 lane() { bash "$KIT/scripts/super-board-codex-lane.sh" --config "$T/config.json" --card "$CARD" --lane "$@" 2>"$T/stderr"; }
 wave() { bash "$KIT/scripts/super-board-codex-wave.sh" --config "$T/config.json" --cards "$CARDS" "$@" 2>"$T/stderr"; }
@@ -65,14 +77,14 @@ grep -q 'Never run bare gh pr merge' "$SB_CODEX_TEST_LOG" || fail 'review must k
 [ "$(last_model)" = default ] || fail 'no model uses Codex default'
 lane build --codex=flag-model >"$T/out"
 [ "$(last_model)" = flag-model ] || fail 'flag model must reach -m'
-echo '{"codex":{"model":"config-model"}}' > "$T/config.json"
+echo '{"codex":{"model":"config-model"},"verify_commands":["git diff --check"]}' > "$T/config.json"
 lane qa --codex >"$T/out"
 [ "$(last_model)" = config-model ] || fail 'config model must reach -m'
 lane qa --codex=flag-model >"$T/out"
 [ "$(last_model)" = flag-model ] || fail 'flag must beat config'
 RC=0; lane qa >"$T/out" || RC=$?
 [ "$RC" -eq 78 ] || fail 'fallback without usage_fallback "codex" must refuse'
-echo '{"codex":{"model":"config-model"},"usage_fallback":"codex"}' > "$T/config.json"
+echo '{"codex":{"model":"config-model"},"usage_fallback":"codex","verify_commands":["git diff --check"]}' > "$T/config.json"
 lane qa >"$T/out"
 [ "$(last_model)" = config-model ] || fail 'build/qa fallback uses config model'
 RC=0; lane review >"$T/out" || RC=$?
@@ -81,7 +93,7 @@ RC=0; lane build --codex= >"$T/out" || RC=$?
 [ "$RC" -eq 64 ] || fail 'empty explicit model must refuse'
 
 # Ladders: run tier x card grade -> model; an ungraded card takes the medium cell.
-echo '{}' > "$T/config.json"
+echo '{"verify_commands":["git diff --check"]}' > "$T/config.json"
 while read -r TIER GRADE WANT; do
   lane build --codex --tier "$TIER" ${GRADE:+--complexity "$GRADE"} >"$T/out"
   [ "$(last_model)" = "$WANT" ] || fail "ladder $TIER/$GRADE must pick $WANT, got $(last_model)"
@@ -102,17 +114,17 @@ lane qa --codex --tier low >"$T/out"
 [ "$(last_model)" = gpt-6.1-sol ] || fail 'ungraded --low card takes the medium cell'
 lane build --codex=flag-model --tier high --complexity high >"$T/out"
 [ "$(last_model)" = flag-model ] || fail 'explicit --codex=<model> beats the ladder'
-echo '{"codex":{"model":"config-model"}}' > "$T/config.json"
+echo '{"codex":{"model":"config-model"},"verify_commands":["git diff --check"]}' > "$T/config.json"
 lane build --codex --tier low --complexity low >"$T/out"
 [ "$(last_model)" = config-model ] || fail 'codex.model beats the ladder'
-echo '{"codex":{"model":""}}' > "$T/config.json"
+echo '{"codex":{"model":""},"verify_commands":["git diff --check"]}' > "$T/config.json"
 lane build --codex --tier high --complexity low >"$T/out"
 [ "$(last_model)" = gpt-6-astra ] || fail 'empty codex.model leaves the ladder in charge'
 RC=0; lane build --codex --tier extreme >"$T/out" || RC=$?
 [ "$RC" -ne 0 ] || fail 'unknown tier must refuse'
 
 # Wave: the luna router grades Ready cards only when nothing pins a model.
-echo '{"max_workers":1}' > "$T/config.json"
+echo '{"max_workers":1,"verify_commands":["git diff --check"]}' > "$T/config.json"
 CARDS='[{"number":1,"status":"Ready","title":"easy"},{"number":2,"status":"Review"}]'
 : > "$SB_CODEX_TEST_LOG"
 SB_CODEX_TEST_GRADE=low wave --codex --tier low >"$T/out"
@@ -146,6 +158,7 @@ rm -f "$T/stderr"
 # A .git pointer to a superproject-shaped external git dir, without a commit.
 mkdir -p "$T/super/.git/modules"
 git init -q --separate-git-dir="$T/super/.git/modules/kit" "$T/submodule"
+python3 "$KIT/tests/fixtures/install_worker_skills.py" "$T/submodule"
 cd "$T/submodule"
 lane review --codex >"$T/out"
 python3 - "$SB_CODEX_TEST_LOG" "$T/submodule" "$T/super/.git/modules/kit" <<'PY'
@@ -174,7 +187,7 @@ RC=0; SB_CODEX_TEST_EXIT=2 lane build --codex >"$T/out" || RC=$?
 [ "$RC" -eq 1 ] && jq -e '.status == "failed"' "$T/out" >/dev/null || fail 'nonzero exec never trusts success JSON'
 
 CARDS='[{"number":1,"status":"Ready"},{"number":2,"status":"Ready","labels":["qa"]},{"number":3,"status":"QA"},{"number":4,"status":"Review"}]'
-echo '{"max_workers":1,"codex":{"model":"config-model"}}' > "$T/config.json"
+echo '{"max_workers":1,"codex":{"model":"config-model"},"verify_commands":["git diff --check"]}' > "$T/config.json"
 : > "$SB_CODEX_TEST_LOG"
 wave --codex=wave-model --output "$T/wave.json" > "$T/out"
 cmp "$T/out" "$T/wave.json" || fail 'file and stdout wave result differ'
@@ -190,8 +203,24 @@ RC=0; SB_CODEX_TEST_STATUS=halted wave --codex >"$T/out" || RC=$?
 [ "$RC" -eq 79 ] && [ "$(wc -l < "$SB_CODEX_TEST_LOG" | tr -d ' ')" -eq 1 ] || fail 'halt stops all new lane dispatch'
 jq -e '.halted and (.cards | length) == 4' "$T/out" >/dev/null || fail 'halt summary preserves all cards'
 
+# A readiness halt returned by a running lane stops dispatch and preserves its owned lock.
+: > "$SB_CODEX_TEST_LOG"
+RC=0; SB_CODEX_TEST_EXIT=9 wave --codex >"$T/out" || RC=$?
+[ "$RC" -eq 9 ] && [ "$(wc -l < "$SB_CODEX_TEST_LOG" | tr -d ' ')" -eq 1 ] || fail 'readiness halt stops new Codex dispatch'
+jq -e '.halted and .cards[0].finalStatus == "halted" and (.cards[0].detail | contains("verification-readiness"))' "$T/out" >/dev/null || fail 'readiness is a setup halt, not failed/rebase'
+[ -f .claude/super-board/inflight/1 ] || fail 'readiness halt preserves its lane lock for recovery'
+[ ! -e .claude/super-board/codex-wave.pid ] || fail 'ended wave releases only its PID marker'
+rm .claude/super-board/inflight/1  # fixture recovery before unrelated concurrency tests
+
+# A normal Codex completion can also report gate exit 9 in its structured result.
+: > "$SB_CODEX_TEST_LOG"
+RC=0; SB_CODEX_TEST_STATUS=halted SB_CODEX_TEST_DETAIL='verification-readiness: checks missing' wave --codex >"$T/out" || RC=$?
+[ "$RC" -eq 9 ] && [ "$(wc -l < "$SB_CODEX_TEST_LOG" | tr -d ' ')" -eq 1 ] || fail 'structured readiness halt preserves code 9'
+[ -f .claude/super-board/inflight/1 ] || fail 'structured readiness halt preserves lane state'
+rm .claude/super-board/inflight/1
+
 # Two card chains run together, but a cap of 1 above was serial.
-echo '{"max_workers":2}' > "$T/config.json"
+echo '{"max_workers":2,"verify_commands":["git diff --check"]}' > "$T/config.json"
 CARDS='[{"number":1,"status":"Review"},{"number":2,"status":"Review"}]'
 : > "$SB_CODEX_TEST_LOG"
 SB_CODEX_TEST_DELAY=1 wave --codex >"$T/out"

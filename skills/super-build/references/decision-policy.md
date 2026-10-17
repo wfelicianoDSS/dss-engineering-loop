@@ -74,6 +74,11 @@ against the unfixed code (a timeout or missing selector means you pinned the
 harness, not the bug), and it must **survive a refactor** that leaves behaviour
 unchanged.
 
+
+**Before worker writes or worktree creation:** follow [skill readiness](../../super-board/references/skills-readiness.md).
+Resolve this lane for the actual host, load the report's files/fallbacks, halt
+on missing requirements and recheck each conditional helper before use.
+
 ## Label routing
 
 A ticket already declares what kind of work it is. Reading that label is cheaper
@@ -160,6 +165,14 @@ Rung 3 is the default resolution, not a coin flip: prefer the change that
 touches fewer files, adds no public surface, and can be reverted by dropping
 one commit. When two options tie on blast radius, take the one an existing test
 already constrains.
+
+For an authorized, unsettled technical rung-3 fork that introduces a new ownership boundary,
+new/changed public interface, or architecture expensive to reverse, follow
+[design preflight](../../super-board/references/design-preflight.md). An applicable supplied
+design/spec/ADR answers the question at an earlier rung; follow it. Labels alone, ordinary
+bugs and mechanical refactors do not trigger a comparison. Recheck conditional helper
+readiness before use. Record the choice in the existing decision trailer below.
+The comparison does not settle ambiguous product intent or waive any hard human gate.
 
 **One technical check is still mandatory before the final commit:** run
 `mattpocock-skills:code-review` against your own working diff, passing the

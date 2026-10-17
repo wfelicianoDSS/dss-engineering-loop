@@ -87,18 +87,26 @@ if [ "${STUB_PAUSE_AFTER:-}" = "$1 ${2:-}" ]; then
   printf '{"reason":"another worker paused during discovery"}\n' > "$SB_GITHUB_HALT_FILE"
 fi
 case "$1 ${2:-}" in
-  "repo view")     echo "acme" ;;
+  "repo view")     case "$*" in *nameWithOwner*) echo "acme/app";; *) echo "acme";; esac ;;
   "issue list")
+    if [ "${STUB_ROUTER_OUTAGE:-}" = 1 ]; then case "$*" in *"--state all"*) echo "HTTP 503" >&2; exit 1;; esac; fi
     jq_expr=""; prev=""
     for a in "$@"; do [ "$prev" = "--jq" ] && jq_expr="$a"; prev="$a"; done
     hits="${STUB_HITS:-[]}"
     case "$*" in *"--state open"*) hits=$(echo "$hits" | jq '[.[] | select(.state == "OPEN")]');; esac
     if [ -n "$jq_expr" ]; then echo "$hits" | jq -r "$jq_expr"; else echo "$hits"; fi ;;
+  "api graphql")
+    if [ "${STUB_ROUTER_OUTAGE:-}" = 1 ]; then echo "HTTP 503" >&2; exit 1; fi
+    if [ "${STUB_PAUSE_AFTER:-}" = "issue list" ]; then printf '{"reason":"paused during history"}\n' > "$SB_GITHUB_HALT_FILE"; fi
+    hits="${STUB_HITS:-[]}"
+    echo "$hits" | jq '[{data:{repository:{issues:{totalCount:length,pageInfo:{hasNextPage:false,endCursor:null},nodes:.}}}}]' ;;
   "issue view")    echo "https://github.com/acme/app/issues/55" ;;
   "issue create")
     prev=""
     for a in "$@"; do [ "$prev" = "--body-file" ] && [ -r "$a" ] && cat "$a" > "$BODY_LOG"; prev="$a"; done
     echo "https://github.com/acme/app/issues/412" ;;
+  "project item-list")
+    if [ -n "${STUB_BOARD:-}" ]; then echo "$STUB_BOARD"; else echo '{"totalCount":0,"items":[]}'; fi ;;
   "project list")  echo '{"projects":[{"number":7,"title":"Board"}]}' ;;
   "project item-add") echo "PVTI_stub" ;;
   "project view")  echo "PVT_stub" ;;
@@ -114,9 +122,10 @@ esac
 STUB
 chmod +x "$WORK/gh"
 export PATH="$WORK:$PATH" GH_LOG="$WORK/gh.log" BODY_LOG="$WORK/body.filed"
+export SB_COLLECT_STATE_DIR="$WORK/collect-state"
 export SUPER_BOARD_BIN="$REPO_ROOT/scripts"
 
-run() { : > "$GH_LOG"; : > "$BODY_LOG"; "$SCRIPT" --config "$WORK/config.json" "$@" 2>"$WORK/err"; }
+run() { [ "${KEEP_COLLECT_STATE:-0}" = 1 ] || rm -rf "$SB_COLLECT_STATE_DIR"; : > "$GH_LOG"; : > "$BODY_LOG"; "$SCRIPT" --config "$WORK/config.json" "$@" 2>"$WORK/err"; }
 BUG=(--type bug --source sentry --title "Checkout 500 on empty cart" --body-file "$WORK/bug.md" --fingerprint "err|sentry|4411")
 FIX=(--type fix --source prs --title "Merge gate bounces on lockfile drift" --body-file "$WORK/fix.md" --fingerprint "prs|merge-gate|lockfile-drift")
 
@@ -219,10 +228,10 @@ for path in duplicate adopt; do
   RC=0
   if [ "$path" = duplicate ]; then
     OUT=$(STUB_PAUSE_AFTER="issue list" STUB_HITS='[{"number":301,"state":"OPEN","body":"err|sentry|4411"}]' run "${BUG[@]}" --yes) || RC=$?
-    EXPECTED=301
+    EXPECTED=""
   else
     OUT=$(STUB_PAUSE_AFTER="issue view" run --adopt 55 --type feature --yes) || RC=$?
-    EXPECTED=55
+    EXPECTED=""
   fi
   is "$path propagates a pause after its read" 79 "$RC"
   is "$path preserves the existing issue identity after a pause" "$EXPECTED" "$OUT"
@@ -247,5 +256,13 @@ lacks "placement pause prevents a column write" "$(cat "$GH_LOG")" "project item
 rm -f "$SB_GITHUB_HALT_FILE"
 
 echo
+echo "── required collector duplicate read cannot fail open"
+RC=0
+OUT=$(STUB_ROUTER_OUTAGE=1 run "${BUG[@]}" --yes) || RC=$?
+is "all-state duplicate outage halts collector" 79 "$RC"
+WRITES=$(awk '/^(issue (create|comment|edit)|label create|project (item-add|item-edit)) /' "$GH_LOG")
+is "duplicate outage makes no mutations" "" "$WRITES"
+rm -f "$SB_GITHUB_HALT_FILE"
+
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

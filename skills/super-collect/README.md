@@ -11,6 +11,8 @@ board fixes them.
   their human, bot and super-review comments) and **architecture** (read-only refactor finder).
 - Checks every candidate with one fresh verifier: is it real, still happening, already fixed, or a
   duplicate. Unclear ones are filed with `needs-triage`, never silently dropped.
+- Reports a source it cannot reach as `unavailable`, never `empty`: the Sentry and PostHog
+  fetchers print `{"status":"unavailable","error":…}` and exit 2.
 - Files through `super-qa-file-bug.sh` and `super-review-file-refactor.sh`, always into the
   holding column. Nothing reaches `Ready` until `super-board lint` says so.
 
@@ -37,4 +39,11 @@ read-only. Secrets stay in `.env`: `SENTRY_AUTH_TOKEN` (scopes `event:read proje
 Ships in the super-board pack under `skills/super-collect/`; `install.sh` copies it to
 `.claude/skills/super-collect/`. Needs a super-board config, `gh`, `jq` and Python 3 (stdlib only).
 
-Tests: `bash tests/test-collect-file.sh` · `bash tests/test-collect-fetchers.sh`
+Tests: `bash tests/test-collect-file.sh` · `bash tests/test-collect-fetchers.sh` ·
+`bash tests/test-collect-baseline.sh` · `python3 tests/test_collect_baseline.py` (offline, all in
+`tests/run-safety.sh`). The baseline suites replay the canned Sentry, PostHog and PR payloads in
+`tests/fixtures/collect/`: fingerprint dedupe, ticket-format checks, the dry run, unreachable
+sources.
+
+Evals: the four `collect-*` cases in [`evals/`](../../evals/README.md) run the skill on a model
+(paid, not in CI): Sentry verdicts, duplicate, PostHog gap, PR pattern.

@@ -42,9 +42,8 @@
 #
 #   verify_commands: ["cd server && npm run typecheck", "cd server && npm test"]
 #
-# Absent, the gate still merges the base in and reports conflicts, but CANNOT
-# prove the result builds — it says so loudly on stderr rather than implying a
-# check it did not run.
+# Missing, empty, or whitespace-only commands halt with exit 9 before locking or
+# reading GitHub. Configure the owning project's checks; this gate invents none.
 #
 # Usage:
 #   super-board-merge-gate.sh --config <config.json> --pr <number>
@@ -83,6 +82,8 @@
 #      card → Blocked with the 🙋 template: the human reviews and merges it, or
 #      comments "done" after its pinned request to approve — the next wave re-runs
 #      the gate, which then skips the policy check and merges.
+#   9  verification-readiness: repair config.verify_commands and restart; preserve
+#      card/worktree/approval state. Never bounce to Build or retry a rebase.
 #   79 required GitHub evidence unavailable: local run halt; preserve card and
 #      approval state, stop dispatch, and explicitly restart after diagnosis.
 #   8  🙋 needs you — the PR has migrations for a database the robot may not
@@ -142,17 +143,24 @@ if [ -z "$STALE_AFTER" ]; then
 fi
 
 CONFIG_JSON=$(cat "$CONFIG")
+printf '%s\n' "$CONFIG_JSON" | python3 "$HERE/super-board-verification-ready.py" --config -
 BASE=$(echo "$CONFIG_JSON" | jq -r '.base_branch // "main"')
 REPO=$(echo "$CONFIG_JSON" | jq -r '.repo.remote // ""' | sed -E 's#^https?://github\.com/##; s#\.git$##')
 REPO_PATH=$(echo "$CONFIG_JSON" | jq -r '.repo.path // "."')
 export SB_REPO_PATH="$REPO_PATH"
-python3 "$GITHUB_READ" --check
 # Read with a while-loop rather than `mapfile`: macOS ships bash 3.2 and every
 # other script in this repo runs there, so this one does too.
 VERIFY=()
 while IFS= read -r line; do
-  [ -n "$line" ] && VERIFY+=("$line")
-done < <(echo "$CONFIG_JSON" | jq -r '.verify_commands // [] | .[]')
+  if [[ "$line" =~ [^[:space:]] ]]; then VERIFY+=("$line"); fi
+done < <(echo "$CONFIG_JSON" | jq -r '.verify_commands[] | select(test("\\S"))')
+
+# Defend the shell boundary too: extraction must leave a command to execute.
+if [ "${#VERIFY[@]}" -eq 0 ]; then
+  echo "verification-readiness: verify_commands yielded no usable shell commands; repair the project config and restart the board." >&2
+  exit 9
+fi
+python3 "$GITHUB_READ" --check
 
 LOCK_DIR="${REPO_PATH}/.claude/super-board/inflight/merge.lock"
 mkdir -p "$(dirname "$LOCK_DIR")"
@@ -270,21 +278,16 @@ if ! git -C "$SCRATCH" merge "origin/${BASE}" --no-edit --quiet 2>/dev/null; the
   exit 5
 fi
 
-if [ "${#VERIFY[@]}" -eq 0 ]; then
-  say "WARNING: config.verify_commands is empty — the base merges cleanly, but"
-  say "WARNING: nothing proved the result BUILDS. A clean merge is not a green build."
-else
-  for cmd in "${VERIFY[@]:-}"; do
-    say "verify: ${cmd}"
-    if ! ( cd "$SCRATCH" && eval "$cmd" ) >"$SCRATCH/.verify.log" 2>&1; then
-      say "FAILED: ${cmd}"
-      tail -30 "$SCRATCH/.verify.log" >&2
-      say "the branch is stale against ${BASE} — send it back to Build for a rebase pass"
-      exit 2
-    fi
-  done
-  say "verified green against ${BASE} (${#VERIFY[@]} command(s))"
-fi
+for cmd in "${VERIFY[@]}"; do
+  say "verify: ${cmd}"
+  if ! ( cd "$SCRATCH" && eval "$cmd" ) >"$SCRATCH/.verify.log" 2>&1; then
+    say "FAILED: ${cmd}"
+    tail -30 "$SCRATCH/.verify.log" >&2
+    say "the branch is stale against ${BASE} — send it back to Build for a rebase pass"
+    exit 2
+  fi
+done
+say "verified green against ${BASE} (${#VERIFY[@]} command(s))"
 
 python3 "$GITHUB_READ" --check
 

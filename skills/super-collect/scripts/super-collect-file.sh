@@ -31,6 +31,7 @@
 #         79 repository paused (existing issue number still on stdout after discovery)
 set -uo pipefail
 
+ORIGINAL_ARGS=("$@")
 CONFIG=""; TYPE=""; SOURCE=""; TITLE=""; BODY_FILE=""; FP=""
 PRIORITY="medium"; AREA=""; ADOPT=""; YES=0; EXTRA_LABELS=()
 
@@ -66,6 +67,7 @@ if [ -z "$ADOPT" ]; then
   esac
   [ -n "$TITLE" ] || die "--title is required" 64
   [ -n "$FP" ]    || die "--fingerprint is required (dedupe key)" 64
+  case "$FP" in *[[:space:]]*) die "--fingerprint must be one token without whitespace" 64;; esac
   case "$FP" in *'"'*|*'\\'*) die "--fingerprint may not contain quotes or backslashes" 64 ;; esac
   case "$SOURCE|$FP" in "posthog|gap|"?*) FP_PREFIX="gap|" ;; esac
   case "$FP" in "$FP_PREFIX"?*) ;; *) die "--fingerprint for source ${SOURCE} must start with '${FP_PREFIX}' (got: $FP)" 64 ;; esac
@@ -96,6 +98,21 @@ fi
 # Router-owned duplicate/adopt writes share the same halt as the child filers.
 GITHUB_READ="$BIN/super-board-github-read.py"
 python3 "$GITHUB_READ" --check || exit $?
+REPO_NAME="${REPO_FLAG[1]:-}"
+if [ -z "$REPO_NAME" ]; then
+  REPO_NAME=$(python3 "$GITHUB_READ" --kind scalar -- repo view --json nameWithOwner --jq .nameWithOwner) || exit $?
+fi
+case "$REPO_NAME" in */*) ;; *) die "cannot resolve owner/name for collector" 70;; esac
+STATE="$BIN/super-board-collect-state.py"
+LOCK_KEY=$(printf '%s' "$REPO_NAME" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().lower().encode()).hexdigest())')
+if [ "${SB_COLLECT_LOCK_HELD:-}" != "$LOCK_KEY" ]; then
+  exec python3 "$STATE" --repo "$REPO_NAME" --lock -- "$0" "${ORIGINAL_ARGS[@]}"
+fi
+state() { python3 "$STATE" --repo "$REPO_NAME" --action "$1" --fingerprint "${FP:-adopt|$ADOPT}" --digest "${DIGEST:-}" --issue "${2:-}"; }
+DIGEST=""
+if [ -n "$BODY_FILE" ]; then
+  DIGEST=$(python3 -c 'import hashlib,sys; print(hashlib.sha256((sys.argv[1]+"\0").encode()+open(sys.argv[2],"rb").read()).hexdigest())' "$SOURCE" "$BODY_FILE") || exit 70
+fi
 
 # --- body sections ----------------------------------------------------------
 # The ticket format is writing-standard.md § 3. super-qa-file-bug.sh enforces the
@@ -116,6 +133,7 @@ need_checklist() {
 }
 if [ -z "$ADOPT" ]; then
   case "$TYPE" in
+    bug) "$BIN/super-qa-file-bug.sh" --title "$TITLE" --body-file "$BODY_FILE" --check-body || exit $? ;;
     feature)  need_sections "Problem" "Context" "Fix" "Acceptance Criteria" "Risk"; need_checklist ;;
     fix)      need_sections "Problem" "Context" "Evidence" "Fix" "Acceptance Criteria" "Risk"; need_checklist ;;
     refactor) need_sections "Problem" "Context" "Fix" ;;
@@ -123,8 +141,7 @@ if [ -z "$ADOPT" ]; then
 fi
 
 # --- holding column ---------------------------------------------------------
-FIELDS=$(gh project field-list "$NUMBER" --owner "$OWNER" --format json 2>/dev/null) \
-  || die "cannot read fields of project ${OWNER}/${NUMBER}" 70
+FIELDS=$(python3 "$GITHUB_READ" --kind fields -- project field-list "$NUMBER" --owner "$OWNER" --format json) || exit $?
 HOLD=""
 for c in Backlog Todo "To do" Triage Inbox; do
   hit=$(echo "$FIELDS" | jq -r --arg c "$c" '.fields[] | select(.name=="Status") | .options[]? | select(.name==$c) | .name' | head -1)
@@ -161,35 +178,58 @@ tag() { # $1 = issue number, rest = labels; best-effort
 # --- adopt ------------------------------------------------------------------
 if [ -n "$ADOPT" ]; then
   if [ "$YES" -ne 1 ]; then echo "would-adopt|#${ADOPT}|${TYPE}|${HOLD}"; exit 0; fi
-  URL=$(gh issue view "$ADOPT" ${REPO_FLAG[@]+"${REPO_FLAG[@]}"} --json url --jq .url 2>/dev/null) || die "cannot read issue #${ADOPT}" 70
+  URL=$(python3 "$GITHUB_READ" --kind scalar -- issue view "$ADOPT" ${REPO_FLAG[@]+"${REPO_FLAG[@]}"} --json url --jq .url) || exit $?
+  BOARD=$(python3 "$GITHUB_READ" --kind items -- project item-list "$NUMBER" --owner "$OWNER" --format json --limit 500) || exit $?
+  # A matching issue number without its repository URL cannot prove whether
+  # this is already our card. Preserve potentially live work until reconciled.
+  AMBIGUOUS=$(printf '%s' "$BOARD" | jq -r --argjson n "$ADOPT" '[.items[] | select(.content.type == "Issue" and .content.number == $n and ((.content.url // "") == ""))] | length') || exit 70
+  if [ "$AMBIGUOUS" != 0 ]; then
+    python3 "$GITHUB_READ" --halt "Board identity is incomplete for issue #${ADOPT}; reconcile before adoption"
+    exit 79
+  fi
+  # Never reset a card already on the board to Backlog, especially live work.
+  ON_BOARD=$(printf '%s' "$BOARD" | jq -r --arg u "$URL" '[.items[] | select(.content.url == $u)] | length') || exit 70
+  if [ "$ON_BOARD" != 0 ]; then echo "$ADOPT"; exit 0; fi
+  state begin "$ADOPT" || exit $?
   tag "$ADOPT" "$TYPE" "source:collect" ${EXTRA_LABELS[@]+"${EXTRA_LABELS[@]}"} || { RC=$?; echo "$ADOPT"; exit "$RC"; }
   place "$URL" || { RC=$?; echo "$ADOPT"; [ "$RC" -eq 79 ] && exit 79; echo "warn: #${ADOPT} not placed in '${HOLD}'" >&2; exit 71; }
+  state success "$ADOPT" || exit $?
   echo "$ADOPT"; exit 0
 fi
 
 # --- dedupe -----------------------------------------------------------------
 # Repo-wide, any label, any state. An open hit is a duplicate; a closed-only hit
 # is a recurrence — file again, but name the issue that claimed the fix.
-HITS=$(gh issue list ${REPO_FLAG[@]+"${REPO_FLAG[@]}"} --state all --limit 500 \
-  --json number,state,body \
-  --jq "[.[] | select(.body != null and (.body | contains(\"${FP}\")))] | sort_by(.state != \"OPEN\") | map(\"\(.number) \(.state)\") | .[]" 2>/dev/null || true)
+# Exact match on a whitespace-delimited token: `err|sentry|441` must not hit `err|sentry|4411`.
+ISSUES_JSON=$(python3 "$GITHUB_READ" --issue-history "$REPO_NAME") || exit $?
+HITS=$(printf '%s' "$ISSUES_JSON" | jq -r --arg fp "$FP" '[.[] | select(any(.body | splits("\\s+"); . == $fp))] | sort_by(.state != "OPEN") | map("\(.number) \(.state)") | .[]') || exit 70
+
 OPEN_HIT=$(echo "$HITS" | awk '$2=="OPEN"{print $1; exit}')
 CLOSED_HIT=$(echo "$HITS" | awk '$2!="OPEN" && $1!=""{print $1; exit}')
 
 if [ -n "$OPEN_HIT" ]; then
   if [ "$YES" -ne 1 ]; then echo "duplicate|#${OPEN_HIT}|${TYPE}|${TITLE}"; exit 0; fi
   python3 "$GITHUB_READ" --check || { RC=$?; echo "$OPEN_HIT"; exit "$RC"; }
+  SEEN=$(state seen "$OPEN_HIT") || exit $?
+  if [ "$SEEN" = unchanged ]; then echo "$OPEN_HIT"; exit 0; fi
+  state begin "$OPEN_HIT" || exit $?
   gh issue comment "$OPEN_HIT" ${REPO_FLAG[@]+"${REPO_FLAG[@]}"} --body "Seen again by super-collect (${SOURCE}).
 
-$(cat "$BODY_FILE")" >/dev/null 2>&1 || echo "warn: could not comment on #${OPEN_HIT}" >&2
+$(cat "$BODY_FILE")" >/dev/null 2>&1 || { python3 "$GITHUB_READ" --halt "Collector comment outcome unknown for #${OPEN_HIT}; reconcile before retrying"; echo "$OPEN_HIT"; exit 79; }
+  state success "$OPEN_HIT" || exit $?
   echo "$OPEN_HIT"; exit 0
 fi
 
 if [ "$YES" -ne 1 ]; then
+  # A bug's full shape is the QA filer's check; run it now so the plan never says
+  # would-file for a body --yes would refuse with 66.
+  if [ "$TYPE" = bug ]; then "$BIN/super-qa-file-bug.sh" --title "$TITLE" --body-file "$BODY_FILE" --check-body || exit $?; fi
   if [ -n "$CLOSED_HIT" ]; then echo "recurrence|#${CLOSED_HIT}|${TYPE}|${TITLE}|${HOLD}"
   else echo "would-file|${TYPE}|${TITLE}|${HOLD}"; fi
   exit 0
 fi
+
+state begin || exit $?
 
 # --- compose + dispatch -----------------------------------------------------
 BODY_TMP=$(mktemp)
@@ -211,7 +251,7 @@ case "$TYPE" in
   *)
     case "$TYPE" in bug) KIND=bug; WEAK=0 ;; feature) KIND=feature; WEAK=1 ;; fix) KIND=tech-debt; WEAK=1 ;; esac
     OUT=$(SUPER_QA_PROJECT_OWNER="$OWNER" SUPER_QA_PROJECT_TITLE="$PTITLE" \
-      SUPER_QA_TARGET_OPTION_NAME="$HOLD" SUPER_QA_ALLOW_WEAK_BODY="$WEAK" \
+      SUPER_QA_TARGET_OPTION_NAME="$HOLD" SUPER_QA_ALLOW_WEAK_BODY="$WEAK" SUPER_QA_REPO="$REPO_NAME" \
       "$BIN/super-qa-file-bug.sh" --title "$TITLE" --body-file "$BODY_TMP" --kind "$KIND" \
       --priority "$PRIORITY" --fingerprint "$FP" ${AREA:+--area "$AREA"} 2>"$ERR"); RC=$? ;;
 esac
@@ -220,7 +260,13 @@ N=$(echo "$OUT" | tail -1)
 # A child may have created the issue before a required placement read failed.
 # Preserve its identity without tagging or making further writes after the halt.
 if [ "$RC" -eq 79 ]; then [ -z "$N" ] || echo "$N"; exit 79; fi
+if [ "$RC" -eq 64 ] || [ "$RC" -eq 66 ]; then state known-failure || true; fi
 case "$N" in ''|*[!0-9]*) die "filer failed (exit ${RC})" "$([ "$RC" -ne 0 ] && echo "$RC" || echo 70)" ;; esac
+if [ "$RC" -ne 0 ]; then
+  python3 "$GITHUB_READ" --halt "Collector filing/placement incomplete for #${N}; reconcile before retrying"
+  echo "$N"; exit 79
+fi
 tag "$N" "source:collect" "collect:${SOURCE}" ${EXTRA_LABELS[@]+"${EXTRA_LABELS[@]}"} || { RC=$?; echo "$N"; exit "$RC"; }
+if [ "$RC" -eq 0 ]; then state success "$N" || exit $?; fi
 echo "$N"
 exit "$RC"

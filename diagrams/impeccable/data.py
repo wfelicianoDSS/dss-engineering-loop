@@ -348,3 +348,224 @@ HOWH = {
 "colorize":"color plan","bolder":"Touches only","quieter":"Reduces color","animate":"reduced-motion","delight":"one idea","overdrive":"waits for your pick",
 "polish":"latest critique","extract":"3 or more times","live":"3 versions","hooks":"turns the checker","doctor":"Fixes safe problems","pin":"/polish",
 }
+
+# ---- v6: stage heads are groups, not commands. Parents = commands that really call others (sources: see impeccable-parent-child.md) ----
+CALLS = {  # parent -> [(child, why)]
+"delight":[("animate","for authored motion")],
+"document":[("init","only in seed mode, if PRODUCT.md is missing")],
+"live":[(c,"") for c in ["bolder","quieter","distill","polish","typeset","colorize","layout","adapt","animate","delight","overdrive"]],
+}
+STAGEX = {
+"ctx":{"for":"Gets the **background facts** in place so ==every later command knows your product==.",
+ "pick":[("init","new project: who is it for?"),("document","code exists: write down the look"),("extract","same UI repeats: share it"),("menu","not sure: ask what is next")],
+ "runT":"Run how many?","run":"Run **only what is missing**. ==Start with init==, then document once code exists. extract and the menu are optional."},
+"plan":{"for":"==Decide before you build==, then build the new screen.",
+ "pick":[("shape","plan only, no code"),("craft","build it (same as just asking for a build)")],
+ "runT":"Run how many?","run":"==Plan with shape, then build.== **craft adds nothing new**: asking for a build does the same."},
+"diag":{"for":"==Find out what is wrong== **before fixing**. Both only report.",
+ "pick":[("critique","does it feel easy to use?"),("audit","is it built right: speed, access, phones?")],
+ "runT":"Run both?","run":"==Either order, or both.== **They do not call each other** and do not run together. Each runs alone; critique first if unsure."},
+"fix":{"for":"==Repair the problems== the review found.",
+ "pick":[("harden","breaks on odd data"),("clarify","words are confusing"),("adapt","wrong on other screens"),("optimize","feels slow"),("onboard","new users get lost"),("distill","too cluttered")],
+ "runT":"Run how many?","run":"==Pick only the ones your findings need.== **Order does not matter**; finish with polish."},
+"style":{"for":"==Improve the look== of what already works.",
+ "pick":[("layout","spacing and order"),("typeset","fonts and sizes"),("colorize","too gray"),("bolder","too bland"),("quieter","too loud")],
+ "runT":"Run how many?","run":"==Pick the one that matches the problem.== **bolder and quieter are opposites**: choose one."},
+"motion":{"for":"==Add life== with movement and charm.",
+ "pick":[("animate","motion that explains"),("delight","one charming moment"),("overdrive","big showpiece effect")],
+ "runT":"Run how many?","run":"==Pick one.== **delight uses animate** for its motion, so you rarely need both."},
+"fin":{"for":"The ==last pass== before you ship.",
+ "pick":[("polish","final tidy-up")],
+ "runT":"Run how many?","run":"==Just polish==, and **always last**, after fixes and styling."},
+}
+
+# ---- v7: synced to impeccable 4.5.2 (upstream pbakaus/impeccable skill-v4.5.2). Adds generate; bare /impeccable is drawn as the router. ----
+VERSION = "4.5.2"
+C.append(("generate","generate","util","one-line variants",
+  ["Parse the sentence: count (default 3, max 8), direction word -> action, element","Reuse the open page, start the live session","Generate the variants (vary along the action's dimension)","Accept or discard; accepted CSS moves into the real stylesheet"],
+  "element + direction + count","Chosen variant written to source","dev server running (web only)","— (calls up to 11 action references)","live","generate.md"))
+UTILITIES = ["hooks", "doctor", "pin", "live", "generate"]
+STAGES[0] = ("ctx", "Setup", "establish context", ["init", "document", "extract"])
+TRIG["generate"] = "quick variants"
+DEF["generate"] = "The fast lane into live mode: name an element, a direction and a count in one sentence and cycle through variants in the browser. Never interviews you for PRODUCT.md or DESIGN.md."
+PAIR["generate"] = "Needs a running dev server (web only). Use live when you want to pick the element by hand."
+ONE["generate"] = "Say the element, the direction and how many, and ==get variants== to flip through in your **browser**."
+WHEN["generate"] = "Use it when your **app is running** and you already know ==which element== to try new looks on."
+HOW["generate"] = ["Reads your sentence: how many (default 3, max 8), which direction, which element","Reuses your open page and starts a live session","Builds the variants and swaps them in","You accept or discard; an accepted one is saved into your real styles"]
+HOWH["generate"] = "how many"
+GET["generate"] = "The variant you chose, saved to your code"
+NEXT["generate"] = "polish"
+FLOWS["generate"] = [["/generate 3 bolder hero","reads count + direction + element","live session on your open page","variants swap in","you accept: saved to code"],["direction words map to","[[bolder]] [[quieter]] [[typeset]] [[colorize]] [[layout]] …"]]
+CALLS["generate"] = list(CALLS["live"])
+# the bare /impeccable command is the router (drawn far left)
+HOW["menu"] = ["Reads your project's state with one quick scan","Runs the design checker once on the files that changed (web only)","Picks the 2-3 most useful next commands","Shows them with the full list. It never runs anything on its own"]
+HOWH["menu"] = "2-3 most useful"
+ONE["menu"] = "The **front door**. It ==reads your project and picks the right command== for you."
+WHEN["menu"] = "Use it when you are **not sure** what to do ==next==, or just ==say what you want in words==."
+GET["menu"] = "2-3 pointed picks, with the exact command to type"
+NEXT["menu"] = "whichever command it picks"
+ROUTE_PICKS = [  # situation -> command(s); from reference/routing.md:9-20
+ ["No `PRODUCT.md` yet","[[init]]"],
+ ["Code, but no `DESIGN.md`","[[document]]"],
+ ["Never reviewed before","[[critique]]"],
+ ["Review score low or P0/P1 problems","[[polish]]"],
+ ["Changes on one screen","[[audit]] or [[polish]] on those files"],
+ ["Dev server running (web)","[[live]] or [[generate]]"],
+ ["Phone app (iOS/Android)","no live or generate"],
+ ["Nothing stands out","groups: build new / improve / try looks"],
+]
+ROUTE_WORDS = [  # free-text routing, SKILL.md:72-75
+ ["\"make it bolder\"","[[bolder]]"],
+ ["\"the words are confusing\"","[[clarify]]"],
+ ["\"build a landing page\"","[[init]] if needed","new-work flow"],
+ ["two commands fit","asks you once"],
+]
+# stages: no router exists. Pick by symptom (symptom -> command)
+STAGEX = {
+"ctx":{"for":"Gets the **background facts** in place so ==every later command knows your product==.",
+ "pick":[("init","no product notes yet"),("document","code, but no design file"),("extract","same UI keeps repeating")],
+ "runT":"Run how many?","run":"Run **only what is missing**. ==Start with init==, then document once code exists."},
+"plan":{"for":"==Decide before you build==, then build the new screen.",
+ "pick":[("shape","want a plan before any code"),("craft","want it built (same as just asking)")],
+ "runT":"Run how many?","run":"==Plan with shape, then build.== **craft adds nothing new**: asking for a build does the same."},
+"diag":{"for":"==Find out what is wrong== **before fixing**. Both only report.",
+ "pick":[("critique","not sure it feels easy to use"),("audit","not sure it is built right: speed, access, phones")],
+ "runT":"Run both?","run":"==Either order, or both.== **They do not call each other** and do not run together. Critique first if unsure."},
+"fix":{"for":"==Repair the problems== the review found.",
+ "pick":[("harden","breaks on odd data or errors"),("clarify","words are confusing"),("adapt","looks wrong on phone or tablet"),("optimize","feels slow"),("onboard","new users get lost"),("distill","too cluttered")],
+ "runT":"Run how many?","run":"==Pick only the ones your findings need.== **Order does not matter**; finish with polish."},
+"style":{"for":"==Improve the look== of what already works.",
+ "pick":[("layout","spacing or order feels off"),("typeset","text looks off"),("colorize","too gray"),("bolder","too bland"),("quieter","too loud")],
+ "runT":"Run how many?","run":"==Pick the one that matches the problem.== **bolder and quieter are opposites**: choose one."},
+"motion":{"for":"==Add life== with movement and charm.",
+ "pick":[("animate","needs movement that explains"),("delight","needs a charming moment"),("overdrive","wants a wow effect")],
+ "runT":"Run how many?","run":"==Pick one.== **delight uses animate** for its motion, so you rarely need both."},
+"fin":{"for":"The ==last pass== before you ship.",
+ "pick":[("polish","about to ship")],
+ "runT":"Run how many?","run":"==Just polish==, and **always last**, after fixes and styling."},
+}
+
+# ---- v8: one realistic example per command: (you type, what happens, you get) ----
+EX = {
+"menu":("/impeccable","It scans your project, sees a PRODUCT.md but no design file, and checks which files changed.","Picks like: 1) /impeccable document  2) /impeccable critique pricing page"),
+"init":("/impeccable init","It looks through your repo, then interviews you: who uses the app, what it is for, any limits.","PRODUCT.md written at the project root. No code touched."),
+"document":("/impeccable document","It scans your CSS and components, drafts the colors and fonts, then asks two rounds of questions.","DESIGN.md plus a small sidecar file. No UI changes."),
+"shape":("/impeccable shape a settings page for invoice reminders","It asks about 3 questions: who uses it, what success looks like, what must not change.","A 1-page brief you confirm. No code yet."),
+"craft":("/impeccable craft a pricing page","It picks a visual direction, builds the page, then a fresh reviewer checks it.","A built pricing page and an updated DESIGN.md."),
+"critique":("/impeccable critique the checkout page","Two reviewers run apart: one judges the design, one runs the checker in a browser.","A score like 27/40, a ranked problem list, and a saved snapshot."),
+"audit":("/impeccable audit the dashboard","It checks accessibility, speed, theming, phones and code quality, 0-4 each.","A score like 14/20 and a fix list. Nothing is changed."),
+"harden":("/impeccable harden the signup form","It tries very long names, empty fields, bad input and other languages.","Error, empty and loading states added to the form."),
+"clarify":("/impeccable clarify the error messages","It reads every message and rewrites the vague ones.","\"Something went wrong\" becomes \"We could not save. Check your connection and try again.\""),
+"adapt":("/impeccable adapt the pricing table for phones","It plans a phone layout, not a shrunk copy, and fixes breakpoints and tap sizes.","A pricing table that stacks cleanly on a phone."),
+"optimize":("/impeccable optimize the homepage","It finds the slow part first, fixes it, then measures again.","A faster page with before and after numbers."),
+"onboard":("/impeccable onboard new users","It finds the first win and designs a short, skippable welcome.","A first-run flow and friendly empty states."),
+"distill":("/impeccable distill the settings page","It decides what can go, then removes the duplicates and extras.","A simpler page and a list of what was removed."),
+"layout":("/impeccable layout the account page","It plans reading order and spacing, keeping your current look.","Clear groups and even spacing. Same colors and fonts."),
+"typeset":("/impeccable typeset the blog","It sets roles for headings, body and labels, then fixes sizes and line length.","Easier-to-read text with the same fonts."),
+"colorize":("/impeccable colorize the dashboard","It audits the colors, picks a plan for what each color means, and checks contrast.","Color that guides the eye, with readable text."),
+"bolder":("/impeccable bolder the hero section","It touches only the hero and turns up what your brand already uses.","A hero with more punch. The rest is untouched."),
+"quieter":("/impeccable quieter the landing page","It finds what feels loud and turns down color, weight and motion.","A calmer page that keeps its personality."),
+"animate":("/impeccable animate the menu opening","It picks the job of the motion, then timing and easing.","A smooth open, plus a reduced-motion version."),
+"delight":("/impeccable delight the success screen","It picks one idea and builds it, using animate for the movement.","One small, memorable moment when a task is done."),
+"overdrive":("/impeccable overdrive the landing hero","It proposes 2-3 big ideas and waits for you to pick one.","A showpiece effect that still works on basic browsers."),
+"polish":("/impeccable polish the checkout flow","It reads your last critique as a to-do list, then tidies every state.","A ship-ready flow and a clean list of changes."),
+"extract":("/impeccable extract the buttons","It finds buttons repeated 3+ times, builds one shared button, and replaces every copy.","One shared button component and tokens."),
+"live":("/impeccable live","It starts a helper and opens your app. You click the hero heading and pick bolder.","3 variants swap in. You accept one and it is saved to your code."),
+"hooks":("/impeccable hooks on","From now on the checker runs every time a UI file is edited.","Problems flagged right after each edit."),
+"doctor":("/impeccable doctor","It checks PRODUCT.md, DESIGN.md and the settings for out-of-date parts.","A short report and the safe fixes already done."),
+"pin":("/impeccable pin polish","It creates a shortcut for the command.","You can now just type /polish."),
+"generate":("/impeccable generate 3 bolder variants of the hero heading","It reads count, direction and element, then opens a live session on your page.","3 bolder hero variants to flip through. Accept one and it is saved."),
+}
+STAGE_EX = {
+"ctx":("Setup is missing: the AI keeps guessing your brand","Run /impeccable init","PRODUCT.md, so every later command knows your product."),
+"plan":("You want a new settings page","Run /impeccable shape a settings page","A confirmed brief, then the build."),
+"diag":("The page feels clunky but you cannot say why","Run /impeccable critique the page","A score and a ranked problem list."),
+"fix":("Page feels cluttered","Run /impeccable distill the page","A simpler page and a list of what was cut."),
+"style":("The page looks too gray","Run /impeccable colorize the page","Color with a purpose across the page."),
+"motion":("Buttons feel dead","Run /impeccable animate the buttons","Motion that shows what is happening."),
+"fin":("You are about to ship","Run /impeccable polish the page","A clean, ship-ready page."),
+}
+
+# ---- v9: "When X -> use this" bullets, story examples, stage pick lists (markup: **bold** ==one highlight== `code` [[chip]]) ----
+WHENL = {
+"menu":["When you open a project and ==do not know what to do first== → [[menu]]","When you want a **fresh next step** after finishing a task → [[menu]]","When you can just **say what you want** in words → [[menu]] picks the command for you"],
+"init":["When the project is **brand new** and ==nothing records who it is for== → [[init]]","When the AI keeps **guessing your brand** → [[init]]","When PRODUCT.md is **missing** → [[init]] first, then the rest"],
+"document":["When you have **code but no design file** and ==want later edits to stay on-brand== → [[document]]","When the look has **drifted** from what DESIGN.md says → [[document]] again","When there is **no code yet** → [[document]] still works from your interview (seed mode)"],
+"shape":["When the screen is **big or unclear** and ==you want a plan before any code== → [[shape]]","When you want a **brief the team can confirm** first → [[shape]]","When you just want it **built** → [[craft]] or simply ask"],
+"craft":["When you want a **new screen or a redesign** built end to end → [[craft]]","When you only need a **plan, not code** → [[shape]]","When you can just **ask for the build**: ==craft is the same thing== → [[craft]]"],
+"critique":["When ==the page works but you cannot say why it feels off== → [[critique]]","When you want a **design score and ranked problems** before fixing → [[critique]]","When you care about **speed or accessibility** instead → [[audit]]"],
+"audit":["When you need to know if it is **built right**: ==speed, access, phones== → [[audit]]","When a **launch checklist** wants numbers → [[audit]]","When the question is **how it feels to use** → [[critique]]"],
+"harden":["When ==real users will paste odd data== (very long names, empty fields) → [[harden]]","When **errors or empty states** look broken → [[harden]]","When the app must work in **other languages** → [[harden]]"],
+"clarify":["When people ==do not understand a label or error== → [[clarify]]","When buttons say **\"Submit\"** and nobody knows what happens → [[clarify]]","When help text is **too long** → [[clarify]]"],
+"adapt":["When it looks fine on desktop but ==breaks on a phone== → [[adapt]]","When you need a **print or email** version → [[adapt]]","When touch targets are **too small** → [[adapt]]"],
+"optimize":["When the page ==feels slow or janky== → [[optimize]]","When **Core Web Vitals** (load, response, stability) are red → [[optimize]]","When you want **before and after numbers** → [[optimize]]"],
+"onboard":["When ==new users get lost== on first use → [[onboard]]","When an **empty screen** just says \"No data\" → [[onboard]]","When people **drop off** before their first win → [[onboard]]"],
+"distill":["When the screen is ==too cluttered== → [[distill]]","When there are **too many options** or duplicate info → [[distill]]","When you want to **remove, not add** → [[distill]]"],
+"layout":["When ==spacing or reading order feels off== → [[layout]]","When **related things are not grouped** → [[layout]]","When the page is **one long flat column** → [[layout]]"],
+"typeset":["When the **text is hard to read** or ==fonts look random== → [[typeset]]","When headings and body **do not feel different** → [[typeset]]","When lines are **too long** to read → [[typeset]]"],
+"colorize":["When the design is ==gray, flat and lifeless== → [[colorize]]","When color is used with **no meaning** → [[colorize]]","When you want a **new palette identity** → [[craft]] instead"],
+"bolder":["When ==the page works but looks flat and boring== → [[bolder]]","When **one section** feels timid → [[bolder]] on just that section","When it is **too loud already** → [[quieter]]"],
+"quieter":["When the design is ==too loud or garish== → [[quieter]]","When **everything fights for attention** → [[quieter]]","When it feels **too bland** → [[bolder]] instead"],
+"animate":["When the screen ==feels dead or static== → [[animate]]","When a change **needs to be explained** with motion → [[animate]]","When you want a **charming** moment instead → [[delight]]"],
+"delight":["When ==it is correct but has no personality== → [[delight]]","When a **success screen** feels flat → [[delight]]","When you want **movement only** → [[animate]]"],
+"overdrive":["When you want ==a wow, showpiece effect== → [[overdrive]]","When a **landing hero** should stop people scrolling → [[overdrive]]","When you want it **safe and calm** → [[quieter]]"],
+"polish":["When you are ==about to ship== → [[polish]]","When a **critique** left a to-do list → [[polish]] reads it","When every fix is done and **small details** remain → [[polish]], always last"],
+"extract":["When ==the same button or card is copied 3+ times== → [[extract]]","When **styles drift apart** between pages → [[extract]]","When you want **shared tokens** → [[extract]]"],
+"live":["When ==you want to try new looks in the running app== → [[live]]","When you want to **click an element** and see variants → [[live]]","When you can **name the element** and direction in one line → [[generate]]"],
+"generate":["When you **know the element and the direction**: ==\"3 bolder hero variants\"== → [[generate]]","When you do not want to **click** around → [[generate]]","When you want to **pick the element by hand** → [[live]]"],
+"hooks":["When you want ==mistakes caught as you edit== → [[hooks]]","When the checker is **too noisy** → [[hooks]] ignore rules","When you want it **off for now** → [[hooks]] off"],
+"doctor":["When ==things feel stale after an update== → [[doctor]]","When **PRODUCT.md or DESIGN.md** might be out of date → [[doctor]]","When a **CONTEXT_STALE** notice appears → [[doctor]]"],
+"pin":["When ==you type the same command all day== → [[pin]]","When you want **/polish** instead of the long form → [[pin]]","When a shortcut is **no longer needed** → [[pin]] unpin"],
+}
+# Example: (situation, you type, [what happens steps], you get)
+EX2 = {
+"menu":("You opened a project that has PRODUCT.md but no DESIGN.md.","/impeccable",["It scans the project state and the files that changed.","It runs the design checker once on them.","It picks the 2-3 best next commands."],"Picks like: 1) /impeccable document 2) /impeccable critique pricing page. Nothing runs yet."),
+"init":("A new app and the AI keeps guessing who it is for.","/impeccable init",["It reads your repo first.","It interviews you: users, purpose, limits.","It writes the answers down."],"PRODUCT.md at the project root. No code touched."),
+"document":("Your app has CSS but no design file.","/impeccable document",["It scans CSS, tokens and components.","It drafts the colors and fonts.","It asks two rounds of questions, then writes the file."],"DESIGN.md plus a small sidecar file. No UI changes."),
+"shape":("You need a settings page for invoice reminders.","/impeccable shape a settings page for invoice reminders",["It interviews you: who uses it, what success looks like.","It asks one more round only if something key is missing.","It writes a one-page brief and stops."],"A brief you confirm. No code yet."),
+"craft":("You need a pricing page built.","/impeccable craft a pricing page",["It decides what is already true and asks one round.","It picks a visual direction and builds the page.","A fresh reviewer checks it and DESIGN.md is updated."],"A built pricing page plus an updated DESIGN.md."),
+"critique":("The checkout works but feels clunky.","/impeccable critique the checkout page",["It picks the page to review.","One reviewer judges design, another runs the checker in a browser.","It combines both and saves a snapshot."],"A score like 27/40 and a ranked problem list (P0 worst to P3 minor)."),
+"audit":("Launch is close and you want the technical truth.","/impeccable audit the dashboard",["It checks 5 areas: accessibility, speed, theming, phones, code.","It scores each 0 to 4.","It names the command that fixes each problem."],"A score like 14/20 and a fix list. Nothing is changed."),
+"harden":("The signup form breaks on a 60-letter name.","/impeccable harden the signup form",["It tests very long text, empty fields and bad input.","It checks other languages.","It adds error, empty and loading states."],"A form that copes with messy real input."),
+"clarify":("Users see \"Something went wrong\" and give up.","/impeccable clarify the error messages",["It reads every message on the screen.","It decides what the user needs to know.","It rewrites the vague ones."],"\"Something went wrong\" becomes \"We could not save. Check your connection and try again.\""),
+"adapt":("The pricing table is wide and breaks on phones.","/impeccable adapt the pricing table for phones",["It plans a phone layout, not a shrunk copy.","It adjusts breakpoints and tap sizes.","It checks the result per screen size."],"A pricing table that stacks cleanly on a phone."),
+"optimize":("The homepage takes 6 seconds to show anything.","/impeccable optimize the homepage",["It finds the real slow part first.","It fixes loading, drawing or bundle size.","It measures again."],"A faster page with before and after numbers."),
+"onboard":("New users sign up, see an empty dashboard and leave.","/impeccable onboard new users",["It finds the first win for a new user.","It designs a short, skippable welcome.","It designs the empty screens."],"A first-run flow and friendly empty states."),
+"distill":("The settings page has 40 options and nobody finds anything.","/impeccable distill the settings page",["It looks at what is on screen.","It decides what can go.","It simplifies layout, options and wording."],"A simpler page and a list of what was removed."),
+"layout":("The account page has everything but reads as a flat list.","/impeccable layout the account page",["It picks who is looking and what they need first.","Two checks run apart: a design review and a scan.","It sets a spacing and grouping plan."],"Clear groups and even spacing. Same colors and fonts."),
+"typeset":("The blog text is cramped and the headings look random.","/impeccable typeset the blog",["It decides who reads and for how long.","It sets roles for headings, body and labels.","It fixes sizes and line length."],"Easier-to-read text with the same fonts."),
+"colorize":("The dashboard is all gray.","/impeccable colorize the dashboard",["It audits the colors you have.","It picks a plan: what each color means.","It applies it and checks contrast."],"Color that guides the eye and text that stays readable."),
+"bolder":("The hero section works but looks flat.","/impeccable bolder the hero section",["It touches only the hero.","It finds why it feels flat.","It turns up what your brand already uses."],"A hero with more punch. The rest is untouched."),
+"quieter":("The landing page shouts: bright colors, heavy type, motion everywhere.","/impeccable quieter the landing page",["It finds what feels loud.","It plans what to turn down.","It reduces color, weight and motion."],"A calmer page that keeps its personality."),
+"animate":("The menu pops open with no transition.","/impeccable animate the menu opening",["It decides the job of the motion.","It picks timing and easing.","It builds it with a reduced-motion version."],"A smooth open that also works for people who avoid motion."),
+"delight":("The success screen is correct but cold.","/impeccable delight the success screen",["It finds one moment that deserves a smile.","It picks a single idea.","It builds it, using animate for the movement."],"One small, memorable moment when a task is done."),
+"overdrive":("The landing hero should stop people scrolling.","/impeccable overdrive the landing hero",["It proposes 2-3 big ideas and waits for your pick.","It builds the chosen one with shaders, scroll or physics.","It tests in the browser."],"A showpiece effect that still works on basic browsers."),
+"polish":("The checkout flow is done and ships tomorrow.","/impeccable polish the checkout flow",["It reads your last critique as a to-do list.","It tidies spacing, color and every state.","It confirms the change list is clean."],"A ship-ready flow and a clean list of changes."),
+"extract":("The same button is copied on 9 pages.","/impeccable extract the buttons",["It finds patterns used 3+ times.","It builds one shared button and tokens.","It replaces every copy."],"One shared button component, used everywhere."),
+"live":("You want to try other looks on the pricing cards.","/impeccable live",["It starts a helper and opens your app.","You click the cards and pick a direction.","3 variants swap in; you accept one."],"The variant you chose, saved into your real styles."),
+"generate":("You already know what you want to try.","/impeccable generate 3 bolder variants of the hero heading",["It reads the count, direction and element.","It opens a live session on your page.","It swaps the variants in."],"3 bolder hero headings to flip through. Accept one and it is saved."),
+"hooks":("Design slips keep sneaking in as you edit.","/impeccable hooks on",["It turns the detector on for this project.","It checks every UI file after you edit it.","It flags problems right away."],"Problems flagged right after each edit."),
+"doctor":("You updated impeccable and things feel stale.","/impeccable doctor",["It checks PRODUCT.md, DESIGN.md and the settings.","It fixes the safe problems itself.","It reports the bigger gaps."],"A short report, and the safe fixes already done."),
+"pin":("You run /impeccable polish ten times a day.","/impeccable pin polish",["It creates a standalone shortcut.","It reports whether that worked."],"You can type /polish from now on."),
+}
+STAGE_WHEN = {
+"ctx":["When the AI **keeps guessing your brand** → [[init]]","When you have **code but no design file** → [[document]]","When ==the same UI is copied 3+ times== → [[extract]]"],
+"plan":["When you want ==a plan before any code== → [[shape]]","When you want it **built now** → [[craft]]"],
+"diag":["When ==it feels off but you cannot say why== → [[critique]]","When you need to know if it is **built right** (speed, access, phones) → [[audit]]"],
+"fix":["When it **breaks on odd data or errors** → [[harden]]","When **words are confusing** → [[clarify]]","When it looks wrong on **phones or tablets** → [[adapt]]","When it **feels slow** → [[optimize]]","When ==new users get lost== → [[onboard]]","When it is **too cluttered** → [[distill]]"],
+"style":["When spacing or order is off → [[layout]]","When text looks off → [[typeset]]","When it is **too gray** → [[colorize]]","When ==it is flat and boring== → [[bolder]]","When it is **too loud** → [[quieter]]"],
+"motion":["When it **needs movement that explains** → [[animate]]","When ==it needs a charming moment== → [[delight]]","When you want a **wow effect** → [[overdrive]]"],
+"fin":["When ==you are about to ship== → [[polish]]"],
+}
+STAGE_EX2 = {
+"ctx":("The AI keeps guessing who your app is for.","/impeccable init",["It reads your repo.","It interviews you.","It writes PRODUCT.md."],"PRODUCT.md, so every later command knows your product."),
+"plan":("You want a settings page but have not decided how it should work.","/impeccable shape a settings page",["It interviews you.","It writes a one-page brief.","You confirm it."],"A confirmed brief, then the build."),
+"diag":("The page feels clunky but you cannot say why.","/impeccable critique the page",["Two reviewers run apart.","It combines their findings.","It saves a snapshot."],"A score and a ranked problem list."),
+"fix":("The page feels cluttered.","/impeccable distill the page",["It decides what can go.","It simplifies layout and wording.","It lists what was removed."],"A simpler page."),
+"style":("The page looks too gray.","/impeccable colorize the page",["It audits current colors.","It picks a color plan.","It applies it and checks contrast."],"Color with a purpose across the page."),
+"motion":("The buttons feel dead.","/impeccable animate the buttons",["It finds the job of the motion.","It sets timing and easing.","It adds a reduced-motion option."],"Motion that shows what is happening."),
+"fin":("The checkout ships tomorrow.","/impeccable polish the checkout",["It reads your latest critique.","It tidies every state.","It checks the change list."],"A clean, ship-ready checkout."),
+}
+
+# plain-language node subtitles: 3-5 words, verb first, say what each command does
+TRIG.update({"menu":"pick the right command","init":"record who product serves","document":"write down design tokens","shape":"plan screen before coding","craft":"build screen start to finish","critique":"score design out of 40","audit":"check a11y, speed, mobile","harden":"handle errors, long text","clarify":"rewrite confusing UI copy","adapt":"rework design for other screens","optimize":"speed up slow screens","onboard":"design first-run experience","distill":"strip UI to essentials","layout":"fix spacing and hierarchy","typeset":"fix fonts and sizes","colorize":"add purposeful color","bolder":"make timid design confident","quieter":"tone down loud design","animate":"add explanatory motion","delight":"add one memorable moment","overdrive":"build showpiece effect","polish":"final tidy before shipping","extract":"turn repeats into components","live":"try 3 variants in-browser","hooks":"toggle auto design checker","doctor":"fix stale design files","pin":"make shortcut for command","generate":"make variants to flip through"})

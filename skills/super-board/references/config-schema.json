@@ -31,6 +31,20 @@
   // only; the dispatcher refuses to run (exit 78) unless set here.
   "worker_backend": "workflow",
 
+  // Optional post-completion adapter; never bundles or installs the external skill.
+  // Runs only after selected work is verified merged and no work/approvals remain.
+  // The supervising host checks the resulting diff; the helper itself is read-only.
+  "calibration": {
+    "enabled": false,
+    "mode": "apply-existing",
+    // null discovers only installed calibrate skills in known project/user skill roots.
+    // Otherwise use the installed SKILL.md path (repo-relative, absolute, or ~/...).
+    "skill_path": null,
+    // Explicit EXISTING canonical SKILL.md paths; no wrappers or symlink aliases.
+    // Empty/missing targets skip learning. AGENTS.md/CLAUDE.md/new skills still need approval.
+    "allowed_skill_paths": []
+  },
+
   // Default model ladder for lane workers, indexed by card complexity from
   // the classify router. Overridden per run by `super-board run --low|--high`.
   //   "low"    — haiku (low) / sonnet (medium) / opus (high)
@@ -123,7 +137,8 @@
   // When `true`, Reviewer marks the PR ready but does NOT squash-merge; a
   // human must click merge. Card auto-moves to Done when the PR is merged
   // externally. Default `false`. Legacy switch: new configs leave it `false`
-  // and use `merge_policy` (default "human" = the same thing).
+  // and use `merge_policy`, whose default is "auto". Set its default to
+  // "human" explicitly when every merge should require human approval.
   //
   // On the workflow backend, `false` ALSO requires
   // "Bash(bash .claude/bin/super-board-merge-gate.sh:*)" and "Bash(gh pr merge:*)"
@@ -137,7 +152,8 @@
   // Absent → the defaults below apply.
   "merge_policy": {
     // "auto" (default): normal changes merge on a clean review.
-    // "human": every PR waits for a human click (the old human_approves_merge).
+    // "human": every PR requires human approval (gate exits 7 → Blocked).
+    // A human can merge it or approve the pinned request for the next wave.
     // Onboard recommends "human" when base_branch is production-detected.
     "default": "auto",
     // Small PRs by design. A PR with more changed lines (additions +
@@ -241,6 +257,11 @@
   // keep resetting `no_progress_cycles`. Default `0`.
   "max_dispatches": 0,
 
+  // Optional project-owned runtime comparison for Super QA/Review. No profile
+  // runs unless this is set or the issue asks for it. Paths are repo-relative;
+  // scenarios/dependencies stay with the app. See super-qa runtime-verification.md.
+  "runtime_verification": { "config": "docs/runtime/compare.json" },
+
   // Controls Reviewer's adversarial mode (folded-in super-truth pattern).
   //   "off"          — never adversarial.
   //   "non-trivial"  — (default) activates on cards with diff ≥10 lines OR
@@ -303,6 +324,10 @@
   // is in the chain.
   "usage_fallback": "none",
 
+  // Required for Board dispatch and Board-controlled merges: at least one non-blank
+  // project-owned command. Empty/missing lists halt with verification-readiness (exit 9).
+  // NUL bytes in commands are rejected because shell extraction cannot preserve them.
+  // Include the owning project's checks; the board does not choose a universal runner.
   "verify_commands": [
     "cd server && npm ci --silent && npm run typecheck && npm test"
   ],

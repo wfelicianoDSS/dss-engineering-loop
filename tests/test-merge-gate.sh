@@ -23,7 +23,7 @@ setup() {  # $1 = verify_commands JSON array
   export PATH="$TMP/bin:$PATH"
   mkdir -p "$TMP/.claude/super-board/inflight"
   printf '{"base_branch":"staging","repo":{"path":"%s","remote":"https://github.com/x/y.git"},"verify_commands":%s}' \
-    "$TMP" "${1:-[]}" > "$TMP/c.json"
+    "$TMP" "${1:-[\"git diff --check\"]}" > "$TMP/c.json"
   LOCK="$TMP/.claude/super-board/inflight/merge.lock"
 }
 teardown() { rm -rf "$TMP"; }
@@ -69,12 +69,21 @@ echo "$OUT" | grep -q "reaping" && fail "a 60s-old lock must survive an impatien
 echo "$OUT" | grep -q "could not take the merge lock" || fail "the impatient waiter should time out, got: $OUT"
 teardown
 
-# 5 — an empty verify_commands list warns rather than implying a check it skipped.
-#     Reaching the warning means the lock was taken, so this also proves the happy
-#     path acquires cleanly on an uncontended lock.
-setup '[]'
-OUT=$("$GATE" --config "$TMP/c.json" --pr 1 --lock-timeout 6 2>&1 || true)
-echo "$OUT" | grep -q "lock taken" || fail "an uncontended lock should be taken, got: $OUT"
+# 5 — missing verification is a setup halt, not permission to merge.
+for commands in '[]' '["", " ", "\t\n"]' '["\u0000"]' '["git\u0000 diff --check"]'; do
+  setup "$commands"
+  RC=0; OUT=$("$GATE" --config "$TMP/c.json" --pr 1 --lock-timeout 6 2>&1) || RC=$?
+  [ "$RC" -eq 9 ] || fail "unusable verification must exit 9, got $RC: $OUT"
+  echo "$OUT" | grep -q 'verification-readiness' || fail "must name the setup problem"
+  echo "$OUT" | grep -q 'verify_commands' || fail "must name the setting to repair"
+  [ ! -d "$LOCK" ] || fail "readiness failure must not acquire the merge lock"
+  [ ! -f "$TMP/halt.json" ] || fail "readiness failure must not attempt GitHub reads"
+  teardown
+done
+setup
+jq 'del(.verify_commands)' "$TMP/c.json" > "$TMP/missing.json"
+RC=0; "$GATE" --config "$TMP/missing.json" --pr 1 >/dev/null 2>&1 || RC=$?
+[ "$RC" -eq 9 ] || fail "missing verification must exit 9, got $RC"
 teardown
 
 # 6 — the lock is released on every exit path, including the failures above.
@@ -99,7 +108,7 @@ teardown
 #    STUB_OID_AFTER — headRefOid reported once a merge has been attempted
 #    STUB_MERGE_RC  — exit code of `gh pr merge`
 head_setup() {
-  setup '[]'
+  setup '["git diff --check"]'
   ORIGIN="$TMP/origin.git"; git init -q --bare "$ORIGIN"
   git -C "$TMP" init -q -b staging 2>/dev/null || { git -C "$TMP" init -q; git -C "$TMP" checkout -q -b staging; }
   git -C "$TMP" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
@@ -476,5 +485,21 @@ pol "$(meta "" migrations/1.sql)"          | jq -e '.migrations == ["migrations/
 pol "$(meta "" a/b/migrations/1.sql)"      | jq -e '.migrations | length == 1' >/dev/null || fail "**/ should match nested directories"
 pol "$(meta "" migrations/old/1.sql)"      | jq -e '.migrations | length == 0' >/dev/null || fail "* must not cross a /"
 rm -rf "$T25"
+
+# Dry-run also reports missing verification before querying or merging a PR.
+head_setup
+jq '.verify_commands = ["", " "]' "$TMP/c.json" > "$TMP/invalid.json"
+RC=0; STUB_OID="$SHA" "$GATE" --config "$TMP/invalid.json" --pr 1 --dry-run >/dev/null 2>&1 || RC=$?
+[ "$RC" -eq 9 ] || fail "dry-run must expose missing verification as setup, got $RC"
+[ ! -s "$GH_LOG" ] || fail "unready setup must not call GitHub"
+teardown
+
+# A real configured command still runs; a failed project check blocks the merge.
+head_setup
+jq '.verify_commands = ["", " ", "git rev-parse --verify nonexistent-ref"]' "$TMP/c.json" > "$TMP/failing.json"
+RC=0; STUB_OID="$SHA" "$GATE" --config "$TMP/failing.json" --pr 1 --expect-head "$SHA" >/dev/null 2>&1 || RC=$?
+[ "$RC" -eq 2 ] || fail "failed configured project check must exit 2, got $RC"
+grep -q '^pr merge' "$GH_LOG" && fail "failed check must not merge"
+teardown
 
 echo "PASS: test-merge-gate.sh (merge, policy and approval scenarios)"

@@ -122,6 +122,8 @@ def _request(st, path, body=None):
             return json.load(resp)
     except urllib.error.HTTPError as e:
         raise PostHogError(f"PostHog HTTP {e.code} on {path.split('?')[0]}") from None
+    except (urllib.error.URLError, OSError) as e:  # DNS, refused, timeout
+        raise PostHogError(f"PostHog unreachable on {path.split('?')[0]}: {getattr(e, 'reason', e)}") from None
 
 
 def hogql(st, query):

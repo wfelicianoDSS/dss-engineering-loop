@@ -21,7 +21,8 @@
 #     [--category functional|visual|network|console|i18n|a11y|data|testability] \
 #     [--area <area>] [--route <route>] [--spec <path>] [--iter <n>] \
 #     [--fingerprint "<slug>|<tc>|<signature>"] \
-#     [--suggested-skill super-build|super-qa|ui-refine-loop|super-review]
+#     [--suggested-skill super-build|super-qa|ui-refine-loop|super-review] \
+#     [--check-body]      # run the body checks only, then exit (no gh calls)
 #       (ui-refine-loop only labels a UI ticket; a human can run /ui-refine-loop —
 #        the board never triggers it)
 #
@@ -39,7 +40,7 @@
 set -uo pipefail
 
 TITLE=""; BODY_FILE=""; KIND="bug"; PRIORITY="medium"; CATEGORY=""
-AREA=""; ROUTE=""; SPEC=""; ITER=""; FINGERPRINT=""; SUGGESTED_SKILL=""
+AREA=""; ROUTE=""; SPEC=""; ITER=""; FINGERPRINT=""; SUGGESTED_SKILL=""; CHECK_ONLY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -54,6 +55,7 @@ while [ $# -gt 0 ]; do
     --iter)            ITER="$2"; shift 2 ;;
     --fingerprint)     FINGERPRINT="$2"; shift 2 ;;
     --suggested-skill) SUGGESTED_SKILL="$2"; shift 2 ;;
+    --check-body)      CHECK_ONLY=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 64 ;;
   esac
 done
@@ -132,6 +134,7 @@ if [ "${SUPER_QA_ALLOW_WEAK_BODY:-0}" != "1" ]; then
   echo "$PROSE" | grep -qE '<[a-zA-Z][^>]*[[:space:]:][^>]*>' && LEFTOVER="${LEFTOVER}${LEFTOVER:+ and }<placeholder>"
   [ -z "$LEFTOVER" ] || die "body still contains unfilled placeholders (${LEFTOVER}) — fill them or set SUPER_QA_ALLOW_WEAK_BODY=1" 66
 fi
+[ "$CHECK_ONLY" -eq 0 ] || exit 0
 
 # --- fingerprint ------------------------------------------------------------
 # Deterministic by construction: the same finding on a later iteration must
@@ -160,12 +163,18 @@ NUMBER=$(echo "$PROJECT_LIST" | jq -r --arg t "$PROJECT_TITLE" \
 [ -n "$NUMBER" ] || die "no project titled '${PROJECT_TITLE}' under ${OWNER} — create one, or set SUPER_QA_PROJECT_TITLE" 70
 
 # --- dedupe -----------------------------------------------------------------
-ISSUES_JSON=$(python3 "$GITHUB_READ" --kind dedupe -- issue list --label "source:qa" --state open --limit 200 --json number,body) || exit $?
-EXISTING=$(printf '%s' "$ISSUES_JSON" | jq -r --arg fingerprint "$FINGERPRINT" '[.[] | select(.body | contains($fingerprint)) | .number] | first // empty')
+REPO_NAME="${SUPER_QA_REPO:-}"
+if [ -z "$REPO_NAME" ]; then
+  REPO_NAME=$(python3 "$GITHUB_READ" --kind scalar -- repo view --json nameWithOwner --jq .nameWithOwner) || exit $?
+fi
+REPO_FLAG=(-R "$REPO_NAME")
+ISSUES_JSON=$(python3 "$GITHUB_READ" --issue-history "$REPO_NAME") || exit $?
+EXISTING=$(printf '%s' "$ISSUES_JSON" | jq -r --arg fingerprint "$FINGERPRINT" '[.[] | select(.state == "OPEN" and any(.body | splits("\\s+"); . == $fingerprint)) | .number] | first // empty')
+
 
 if [ -n "$EXISTING" ]; then
   python3 "$GITHUB_READ" --check || exit $?
-  gh issue comment "$EXISTING" --body "Seen again${ITER:+ on iteration ${ITER}}.
+  gh issue comment "$EXISTING" "${REPO_FLAG[@]}" --body "Seen again${ITER:+ on iteration ${ITER}}.
 
 ${BODY_RAW}" >/dev/null 2>&1 || { python3 "$GITHUB_READ" --halt "Comment outcome unknown for #${EXISTING}; inspect before retrying"; exit 79; }
   echo "$EXISTING"
@@ -232,13 +241,13 @@ if [ -n "$SUGGESTED_SKILL" ]; then LABELS+=("skill:${SUGGESTED_SKILL}"); fi
 # entirely. Create them best-effort first.
 for l in "${LABELS[@]}"; do
   python3 "$GITHUB_READ" --check || exit $?
-  gh label create "$l" --color D93F0B --force >/dev/null 2>&1 || true
+  gh label create "$l" "${REPO_FLAG[@]}" --color D93F0B --force >/dev/null 2>&1 || true
 done
 LABEL_ARGS=()
 for l in "${LABELS[@]}"; do LABEL_ARGS+=(--label "$l"); done
 
 python3 "$GITHUB_READ" --check || exit $?
-ISSUE_URL=$(gh issue create --title "$FULL_TITLE" --body-file "$BODY_TMP" "${LABEL_ARGS[@]}") \
+ISSUE_URL=$(gh issue create "${REPO_FLAG[@]}" --title "$FULL_TITLE" --body-file "$BODY_TMP" "${LABEL_ARGS[@]}") \
   || { python3 "$GITHUB_READ" --halt "Issue creation response failed; reconcile fingerprint ${FINGERPRINT} before retrying"; exit 79; }
 ISSUE_N=$(basename "$ISSUE_URL")
 

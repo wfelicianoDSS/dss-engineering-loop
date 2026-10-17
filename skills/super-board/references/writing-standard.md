@@ -214,6 +214,10 @@ under Risk.
 | `## Risk` | 🟢/🟡/🔴 level + one line | yes |
 | `## Blocked by` | `- #N — why` bullets, or exactly `- None.` | yes |
 
+When an unsettled design triggers [design preflight](design-preflight.md), retain the
+approved choice and short rationale in the existing Context, or link its applicable
+spec/ADR there. Keep the same sections. Lint saves only the exact issue edit the user approves.
+
 Example:
 
 ```
@@ -244,6 +248,14 @@ Map 413 to the size message; check size before upload.
 ## Blocked by
 - None.
 ```
+
+**Recurring PR fixes** use the same sections. In Context, identify the shared boundary,
+the prior failing input/action and the condition that allowed it. Evidence cites each prior
+PR/finding; it does not require UI-shaped bug evidence. Fix states the intended prevention
+in 1–3 lines. An AC retains the prior behavioral witness and requires the old failure for
+the reported reason, the corrected pass and survival of behavior-preserving refactors.
+An unavailable prior witness stays unverified. See
+[correction prevention](../../super-collect/references/correction-prevention.md).
 
 **Bug Evidence** — folded. All 12 rows, always; a missing one says `n/a — <why>`.
 

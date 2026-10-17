@@ -88,3 +88,7 @@ every project it is installed in.
 Run `bash tests/run-safety.sh` for the offline suite. A pushed `v*` tag runs the same checks
 on Linux/macOS plus status-reader smoke checks, then publishes only if they pass. Follow
 [RELEASING.md](RELEASING.md); it also lists the settings needed to limit manual bypass.
+
+## Map pages (diagrams/)
+
+Every map page must be listed in the nav and in Explore, from the registry `diagrams/_shared/maps.json`. To add one: create `diagrams/<map>/map.json` (or `map.py`), add its entry (title, blurb, path, thumb, logo) to the registry, add a 960x600 thumb, run `python3 diagrams/_shared/sync_explore.py` then `python3 diagrams/_shared/build_skillmap.py <map>`. The build and `sync_explore.py --check` fail if a map page has no registry entry or the Explore cards are stale.

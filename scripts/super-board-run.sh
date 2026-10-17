@@ -97,6 +97,8 @@ if [ "$WORKER_BACKEND" != "claude-p" ]; then
   exit 78
 fi
 
+python3 "$(dirname "$SB_GITHUB_READ")/super-board-verification-ready.py" --config "$CONFIG_PATH"
+
 RUN_DATE=$(date +%Y-%m-%d)
 RUN_MANIFEST="docs/super-board/runs/${RUN_DATE}-${CONFIG_SLUG}.md"
 # Per-worker logs (issue #13). Workers used to be spawned with >/dev/null, so the run
@@ -319,6 +321,15 @@ dispatch_lane() {
     log "skip dispatch lane=${lane} issue=#${issue} — issue is CLOSED"
     return 0
   fi
+  local card skills_rc=0 skills_report
+  card=$(echo "$PROJECT_ITEMS_JSON" | jq -c --argjson n "$issue" --arg lane "$lane" '
+    [.items[] | select(.content.number == $n) | {number:$n, status:(.status // "Ready"), labels:(.labels // .content.labels // []), lane:$lane}]')
+  [ "$(printf '%s' "$card" | jq length)" -eq 1 ] || { log "skills-readiness: selected issue #${issue} missing from board cache"; exit 64; }
+  skills_report=$(printf '%s' "$card" | python3 "$(dirname "$SB_GITHUB_READ")/super-board-skills-ready.py"     --root "$PWD" --host claude --cards - --hydrate) || skills_rc=$?
+  if [ "$skills_rc" -ne 0 ]; then
+    log "skills-readiness: halt before claim lane=${lane} issue=#${issue}; ${skills_report}"
+    exit "$skills_rc"
+  fi
   if ! try_claim_assignee "$issue"; then
     return 0
   fi
@@ -328,6 +339,7 @@ dispatch_lane() {
     review) prompt="Run super-review on issue #${issue} for super-board run. Read .claude/skills/super-board/references/run.md → Reviewer lifecycle. Config: ${CONFIG_PATH}." ;;
     *) log "unknown lane: $lane"; return 1 ;;
   esac
+  prompt="First operation: run .claude/bin/super-board-skills-ready.py --root '$PWD' --host claude --cards - --lane '$lane' --hydrate with $card as stdin. Halt on exit 10 before worktree creation or lifecycle writes; preserve claims and approval evidence. Load resolved paths and only declared fallbacks; recheck conditionals with --require before activation. $prompt"
   # Worker output goes to a per-worker log, not /dev/null (issue #13). Redirect at the
   # `claude` invocation itself — no wrapping subshell, no `exec` — so the wire to the
   # file survives and `$!` names the worker process rather than a bash stub.
@@ -566,10 +578,11 @@ if [ "${SB_LIB_ONLY:-0}" = "1" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
-# A read failure stops only workers launched by this dispatcher. Keep their
+# A readiness/read failure stops only workers launched by this dispatcher. Keep their
 # locks, worktrees, claims, and approval evidence for explicit recovery.
 halt_cleanup() {
-  if ! python3 "$SB_GITHUB_READ" --check >/dev/null 2>&1; then
+  local rc=$?
+  if [ "$rc" -eq 9 ] || [ "$rc" -eq 10 ] || ! python3 "$SB_GITHUB_READ" --check >/dev/null 2>&1; then
     for pid in "${BUILD_PID:-}" "${QA_PID:-}" "${REVIEW_PID:-}"; do
       [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
     done
@@ -631,6 +644,7 @@ QA_PID=""; QA_ISSUE=""
 REVIEW_PID=""; REVIEW_ISSUE=""
 
 while true; do
+  python3 "$(dirname "$SB_GITHUB_READ")/super-board-verification-ready.py" --config "$CONFIG_PATH"
   gh_checkpoint
   # Workflow-backend mutual exclusion, re-checked every tick: the startup
   # check alone leaves a TOCTOU window where a workflow run starting at the
@@ -762,3 +776,6 @@ while true; do
 done
 
 log "super-board run finished. manifest: $RUN_MANIFEST"
+if jq -e '.calibration.enabled == true' "$CONFIG_PATH" >/dev/null 2>&1; then
+  log "calibration skipped: legacy runner has no supervising skill host; final receipt and installed-skill delegation are required. Exit 0 alone does not prove selected work landed."
+fi

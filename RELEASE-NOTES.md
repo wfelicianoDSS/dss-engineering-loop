@@ -1,5 +1,25 @@
 # Release notes
 
+## v3.1.2 — 2026-10-11
+
+`/super-collect` dedupes on the exact fingerprint and says when Sentry or PostHog is down.
+
+- 🐛 **Exact-fingerprint dedupe.** `super-collect-file.sh` matched fingerprints as substrings,
+  so `err|sentry|441` hit the open issue for `err|sentry|4411`. It now matches whole tokens.
+- 🐛 **The dry run checks a bug ticket's format.** A plan could say `would-file` for a body
+  `--yes` then refused with 66. The dry run now runs the QA filer's checks through the new
+  `super-qa-file-bug.sh --check-body`, which validates and exits without calling `gh`.
+- 🐛 **Unreachable is `unavailable`.** A DNS failure, refused connection or timeout crashed the
+  Sentry and PostHog fetchers; they now print `{"status":"unavailable"}` and exit 2.
+- 🐛 **The gh guard sources from zsh.** `super-board-gh-guard.sh` found its own path only
+  through `BASH_SOURCE`.
+- 📝 **A bare `--title`.** SKILL.md tells the agent to leave out the `🐛 [bug] …:` prefix the
+  filers add, so it no longer appears twice.
+- 🧪 **Offline tests and evals.** `tests/test-collect-baseline.sh` and
+  `tests/test_collect_baseline.py` replay canned Sentry, PostHog and PR payloads in
+  `run-safety.sh`; four paid `evals/collect-*` cases cover Sentry verdicts, a duplicate, a
+  PostHog tracking gap and a PR pattern.
+
 ## v3.1.1 — 2026-10-04
 
 `/super-board run` inside a Codex session runs on Codex instead of failing.

@@ -22,7 +22,9 @@ SB_GH_GUARD_BUDGET_DEFAULT=150     # per-worker soft cap on gh calls
 SB_GH_GUARD_SUBAGENT_BUDGET=50     # per adversarial-mode sub-agent cap
 SB_GH_GUARD_STATE_FILE="${SB_GH_GUARD_STATE_FILE:-${TMPDIR:-/tmp}/super-board-gh-budget-$$}"
 
-SB_GITHUB_READ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/super-board-github-read.py"
+# This file's own path: BASH_SOURCE under bash, the %x prompt escape under zsh.
+if [ -n "${BASH_SOURCE[0]:-}" ]; then _sb_guard_src="${BASH_SOURCE[0]}"; else eval '_sb_guard_src="${(%):-%x}"'; fi
+SB_GITHUB_READ="$(cd "$(dirname "$_sb_guard_src")" && pwd)/super-board-github-read.py"; unset _sb_guard_src
 sb_gh_required_read() { local kind="$1"; shift; python3 "$SB_GITHUB_READ" --kind "$kind" -- "$@"; }
 sb_gh_halt_check() { python3 "$SB_GITHUB_READ" --check; }
 
