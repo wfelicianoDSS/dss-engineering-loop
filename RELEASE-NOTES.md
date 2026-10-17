@@ -1,5 +1,32 @@
 # Release notes
 
+## Unreleased — autonomy pass (2026-10-17)
+
+Recovery that is decidable from state moved from the orchestrator into tested scripts.
+
+- 📏 **Intervention ledger + metrics.** `super-board-metrics.py` and `status.py --metrics`
+  report Done, interventions by class, and per 100 Done.
+- 🔒 **Install drift guard.** A reinstall keeps locally modified control-plane files and reports
+  them; `--overwrite-local` backs the old file up first.
+- 🧪 **Read and merge evidence.** Keyword gates skip test/doc artifacts (`delete from` under
+  `tests/` no longer gates); REST `--paginate --slurp` issue pages are validated; a configured
+  migration command without a reachability check refuses to start; the checkout must be on
+  `base_branch` (autostart syncs a clean tree).
+- ⏯️ **Classified halts.** `transient_read` auto-resumes with backoff (2/5/10/20/30/30 min),
+  any other class stops for a human; six failures leave one attention line.
+- 🧭 **Machine-readable blocks.** `block-class:` / `resume-when:` lines; transient blocks are
+  swept only when their condition verifies, and the third occurrence becomes a human decision.
+- 💓 **Worker leases.** `HEARTBEAT=` is refreshed by each `--check`; stale at `lease_ttl_seconds`,
+  terminated at 2×.
+- ♻️ **Review reuse.** A merged PR reconciles to Done; an approved review of the current head
+  dispatches merge-only instead of a full re-review.
+- 🔁 **One reconcile contract.** `super-board-reconcile.py` reports dispatch/recover/sweep and
+  applies only dead-lease release.
+- 🔀 **Provider health.** `providers/<name>.json`: quota → pause → one probe; 3 non-quota
+  failures open the circuit for 30 min; all-paused wake time is reported.
+- 🎫 **Readiness certificates.** `<!-- sb-ready v1 hash=… -->` after groom/lint; an unchanged,
+  certified Backlog story is never re-groomed.
+
 ## v3.1.2 — 2026-10-11
 
 `/super-collect` dedupes on the exact fingerprint and says when Sentry or PostHog is down.

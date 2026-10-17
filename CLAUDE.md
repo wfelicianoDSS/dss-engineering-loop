@@ -48,8 +48,15 @@ See `skills/super-board/references/rate-limit-etiquette.md` for the full discipl
 ├── skills/<all eight>/...
 ├── hooks/guard-*.py, cleanup-wt.py   (wired into settings.json; --no-hooks skips)
 ├── workflows/super-board-wave.js, ui-refine-loop.js
-└── bin/super-board-*.sh (incl. pr-body), super-board-*.py (status, merge-policy, agents-md, settings, setup), super-qa-file-bug.sh, super-review-file-refactor.sh
+└── bin/super-board-*.sh (incl. pr-body), super-board-*.py (status, metrics, merge-policy, agents-md,
+    settings, setup, groom-select, ready-cert, providers, reconcile), super-qa-file-bug.sh,
+    super-review-file-refactor.sh
 ```
+
+Control-plane files are recorded with their sha256 in
+`.claude/super-board/install-manifest.json`. On reinstall, a file that no longer matches the
+manifest is a local change: it is kept and reported (`kept local change: <path>`), and
+`--overwrite-local` replaces it after backing it up to `<path>.local-<date>`.
 
 It also refreshes the managed `<!-- super-board:begin … -->` block in the target's AGENTS.md when
 one exists (nothing outside the markers), records an older install in
