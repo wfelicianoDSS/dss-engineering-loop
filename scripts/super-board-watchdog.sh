@@ -28,11 +28,16 @@ CFG=".claude/super-board/configs/fieldops.json"
 SB_READ=".claude/bin/super-board-github-read.py"
 STATE_DIR=".claude/super-board"
 LOG="docs/super-board/watchdog.log"; NOTE="docs/super-board/NEEDS-ATTENTION.md"
-RESTART_STATE="/tmp/sb-watchdog-restarts.state"
-STATE="/tmp/sb-watchdog.state"; WLOG="/tmp/board-watchdog.log"
-GATE_STATE="/tmp/sb-watchdog-gate.state"
-LOOP_STATE="/tmp/sb-watchdog-loop.state"
-FIXER_PID="/tmp/sb-watchdog-fixer.pid"; FIXER_LOG="/tmp/sb-watchdog-fixer.log"
+# Scratch state is /tmp by default. SB_WATCHDOG_TMP isolates a test run so it never
+# touches the live watchdog's counters, lock or restart log.
+SB_TMP="${SB_WATCHDOG_TMP:-/tmp}"
+RESTART_STATE="$SB_TMP/sb-watchdog-restarts.state"
+STATE="$SB_TMP/sb-watchdog.state"; WLOG="$SB_TMP/board-watchdog.log"
+GATE_STATE="$SB_TMP/sb-watchdog-gate.state"
+LOOP_STATE="$SB_TMP/sb-watchdog-loop.state"
+FIXER_PID="$SB_TMP/sb-watchdog-fixer.pid"; FIXER_LOG="$SB_TMP/sb-watchdog-fixer.log"
+RUN_LOG="$SB_TMP/sb-run.log"; RUN_PID="$SB_TMP/sb-run.pid"
+GUARD_LOG="$SB_TMP/board-guard.log"; GUARD_PID="$SB_TMP/board-guard.pid"
 HALT_ESCALATE_CHECKS="${SB_HALT_ESCALATE_CHECKS:-6}"
 DRY_RUN=0; [ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 HOST="$(hostname 2>/dev/null || echo unknown)"
@@ -197,11 +202,11 @@ p = pathlib.Path(sys.argv[1]); d = json.loads(p.read_text())
 d['lane_backend'] = 'claude'; d.setdefault('groom', {})['backend'] = 'claude'
 p.write_text(json.dumps(d, indent=2) + "\n")
 PY
-  : > /tmp/sb-run.log
-  nohup .claude/bin/super-board-run.sh fieldops >> /tmp/sb-run.log 2>&1 9>&- &
-  echo $! > /tmp/sb-run.pid
-  nohup .claude/bin/super-board-guard.sh >> /tmp/board-guard.log 2>&1 9>&- &
-  echo $! > /tmp/board-guard.pid
+  : > "$RUN_LOG"
+  nohup .claude/bin/super-board-run.sh fieldops >> "$RUN_LOG" 2>&1 9>&- &
+  echo $! > "$RUN_PID"
+  nohup .claude/bin/super-board-guard.sh >> "$GUARD_LOG" 2>&1 9>&- &
+  echo $! > "$GUARD_PID"
   sleep 25
   runner_up
 }
@@ -228,7 +233,7 @@ escalate_github_halt() {
 }
 
 # ── main ─────────────────────────────────────────────────────────────────────
-exec 9> /tmp/sb-watchdog.lock
+exec 9> "$SB_TMP/sb-watchdog.lock"
 flock -n 9 || exit 0
 
 # A deliberate github-halt is not a liveness failure. Distinguish the two kinds:
