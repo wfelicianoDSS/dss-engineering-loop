@@ -134,6 +134,14 @@ GROOM_READY_FLOOR=$(jq -r '.groom.ready_floor // 1' "$CONFIG_PATH")
 GROOM_COOLDOWN=$(jq -r '.groom.cooldown_seconds // 1800' "$CONFIG_PATH")
 GROOM_STATE=".claude/super-board/groom-state.json"
 GROOM_SIG=""
+# Pure policy: is a groom due? Enabled, Ready at/below the floor, and either the backlog
+# changed or the cooldown elapsed. Extracted so it is testable without a tick.
+groom_due() { # $1=signature $2=last signature $3=last epoch $4=now epoch
+  [ "${GROOM_ENABLED:-true}" = "true" ] || return 1
+  [ "${READY:-0}" -le "${GROOM_READY_FLOOR:-1}" ] || return 1
+  [ "${1:-}" != "${2:-}" ] && return 0
+  [ $(( ${4:-0} - ${3:-0} )) -ge "${GROOM_COOLDOWN:-1800}" ]
+}
 LANE_BACKEND=$(jq -r '.lane_backend // "claude"' "$CONFIG_PATH")
 PROGRESS_SECONDS=$(jq -r '.progress_seconds // 120' "$CONFIG_PATH")
 MAX_DISPATCHES=$(jq -r '.max_dispatches // 0' "$CONFIG_PATH")
@@ -1082,7 +1090,7 @@ while true; do
     GROOM_SIG=$(echo "$PROJECT_ITEMS_JSON" | jq -r '[.items[] | select(.status == "Backlog") | .content.number] | "\(length):\(if length > 0 then max else 0 end)"')
     GROOM_LAST_SIG=$(jq -r '.sig // ""' "$GROOM_STATE" 2>/dev/null || echo "")
     GROOM_LAST_AT=$(jq -r '.at // 0' "$GROOM_STATE" 2>/dev/null || echo 0)
-    if [ "$GROOM_SIG" != "$GROOM_LAST_SIG" ] || [ $(( $(date +%s) - ${GROOM_LAST_AT:-0} )) -ge "${GROOM_COOLDOWN:-1800}" ]; then
+    if groom_due "$GROOM_SIG" "$GROOM_LAST_SIG" "$GROOM_LAST_AT" "$(date +%s)"; then
       dispatch_groom
     else
       log "groom skipped — backlog unchanged (${GROOM_SIG}); forced groom in ≤${GROOM_COOLDOWN}s"
