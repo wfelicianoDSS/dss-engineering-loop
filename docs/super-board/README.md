@@ -336,3 +336,14 @@ Missing, unreadable or stale evidence is a hold for a person, never a pass.
 The minimal `.claude-plugin/plugin.json` exists so `claude plugin eval` can load the pack;
 `install.sh` stays the install path. The full lane-to-skill mapping, including the skills kept
 because Matt's pack has no equivalent, is in `skills/super-build/references/decision-policy.md`.
+
+## Operating the board
+
+The interactive session that starts a run is an **orchestrator, not a worker**. It owns the
+control plane and the provider budget, and it never does product work.
+
+- [The orchestrator](orchestrator.md) — what it does, what it never does, the failure playbook,
+  provider budget, scope decisions and human gates.
+- [Field notes](field-notes.md) — concrete production failures met while operating a board
+  (migrations, provider exhaustion, grooming cost, paginated reads, keyword false positives,
+  stale locks) with cause and fix.
