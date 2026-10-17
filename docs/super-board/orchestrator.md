@@ -45,6 +45,10 @@ surfaces the decisions the board must not invent.
    board's lanes.
 5. **Restart and confirm.** `super-board-autostart.sh` sets `lane_backend` and reconciles a
    stale *read* halt. Confirm the next tick dispatches on the intended provider.
+6. **Record it.** Append one line to `.claude/super-board/interventions.jsonl` for every manual
+   action: `{"at":"<iso>","class":"<failure class>","card":<n|null>,"action":"<what>","minutes":<n>}`.
+   The class comes from the failure table below. `super-board-status.py --metrics` reads the
+   ledger; an action with no line cannot be counted, so no improvement can be proven.
 
 ## Failure classes
 
