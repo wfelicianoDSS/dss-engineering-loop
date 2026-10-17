@@ -150,5 +150,16 @@ if [ "$DRY" -eq 1 ]; then cat "$NEW_TMP"; exit 0; fi
 # $(…) drops trailing newlines, which GitHub does not keep either.
 if [ "$(cat "$OLD_TMP")" = "$(cat "$NEW_TMP")" ]; then echo unchanged; exit 0; fi
 python3 "$GITHUB_READ" --check || exit $?
-jq -n --rawfile b "$NEW_TMP" '{body: $b}' | gh api -X PATCH "repos/{owner}/{repo}/pulls/$PR" --input - >/dev/null 2>&1 || { python3 "$GITHUB_READ" --halt "PR body update outcome unknown for #$PR; read the body before retrying"; exit 79; }
+# Never repeat a PATCH after a lost response: first confirm its remote outcome.
+# Keep gh's diagnostic visible so a rejected write can be distinguished from a timeout.
+if ! jq -n --rawfile b "$NEW_TMP" '{body: $b}' | gh api -X PATCH "repos/{owner}/{repo}/pulls/$PR" --input - >/dev/null; then
+  VERIFIED=$(python3 "$GITHUB_READ" --kind body -- api "repos/{owner}/{repo}/pulls/$PR" --jq '{headRefOid: .head.sha, body: (.body // "")}') || VERIFIED=""
+  if [ -n "$VERIFIED" ] && [ "$(printf '%s' "$VERIFIED" | jq -r '.headRefOid')" = "$NOW" ] &&
+     [ "$(printf '%s' "$VERIFIED" | jq -r '.body')" = "$(cat "$NEW_TMP")" ]; then
+    echo updated
+    exit 0
+  fi
+  python3 "$GITHUB_READ" --halt "PR body update outcome unknown for #$PR; read the body before retrying"
+  exit 79
+fi
 echo updated

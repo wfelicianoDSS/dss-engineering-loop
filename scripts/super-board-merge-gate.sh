@@ -42,8 +42,9 @@
 #
 #   verify_commands: ["cd server && npm run typecheck", "cd server && npm test"]
 #
-# Missing, empty, or whitespace-only commands halt with exit 9 before locking or
-# reading GitHub. Configure the owning project's checks; this gate invents none.
+# Absent, the gate still merges the base in and reports conflicts, but CANNOT
+# prove the result builds — it says so loudly on stderr rather than implying a
+# check it did not run.
 #
 # Usage:
 #   super-board-merge-gate.sh --config <config.json> --pr <number>
@@ -82,8 +83,7 @@
 #      card → Blocked with the 🙋 template: the human reviews and merges it, or
 #      comments "done" after its pinned request to approve — the next wave re-runs
 #      the gate, which then skips the policy check and merges.
-#   9  verification-readiness: repair config.verify_commands and restart; preserve
-#      card/worktree/approval state. Never bounce to Build or retry a rebase.
+#   9  risk classification unavailable (governance enabled) — retain Review; no human request
 #   79 required GitHub evidence unavailable: local run halt; preserve card and
 #      approval state, stop dispatch, and explicitly restart after diagnosis.
 #   8  🙋 needs you — the PR has migrations for a database the robot may not
@@ -143,24 +143,17 @@ if [ -z "$STALE_AFTER" ]; then
 fi
 
 CONFIG_JSON=$(cat "$CONFIG")
-printf '%s\n' "$CONFIG_JSON" | python3 "$HERE/super-board-verification-ready.py" --config -
 BASE=$(echo "$CONFIG_JSON" | jq -r '.base_branch // "main"')
 REPO=$(echo "$CONFIG_JSON" | jq -r '.repo.remote // ""' | sed -E 's#^https?://github\.com/##; s#\.git$##')
 REPO_PATH=$(echo "$CONFIG_JSON" | jq -r '.repo.path // "."')
 export SB_REPO_PATH="$REPO_PATH"
+python3 "$GITHUB_READ" --check
 # Read with a while-loop rather than `mapfile`: macOS ships bash 3.2 and every
 # other script in this repo runs there, so this one does too.
 VERIFY=()
 while IFS= read -r line; do
-  if [[ "$line" =~ [^[:space:]] ]]; then VERIFY+=("$line"); fi
-done < <(echo "$CONFIG_JSON" | jq -r '.verify_commands[] | select(test("\\S"))')
-
-# Defend the shell boundary too: extraction must leave a command to execute.
-if [ "${#VERIFY[@]}" -eq 0 ]; then
-  echo "verification-readiness: verify_commands yielded no usable shell commands; repair the project config and restart the board." >&2
-  exit 9
-fi
-python3 "$GITHUB_READ" --check
+  [ -n "$line" ] && VERIFY+=("$line")
+done < <(echo "$CONFIG_JSON" | jq -r '.verify_commands // [] | .[]')
 
 LOCK_DIR="${REPO_PATH}/.claude/super-board/inflight/merge.lock"
 mkdir -p "$(dirname "$LOCK_DIR")"
@@ -239,8 +232,17 @@ META=$(mktemp); DIFF=$(mktemp)
 python3 "$GITHUB_READ" --kind metadata -- pr view "$PR" ${REPO:+--repo "$REPO"} --json labels,files,additions,deletions,changedFiles,body > "$META"
 python3 "$GITHUB_READ" --kind diff --meta "$META" -- pr diff "$PR" ${REPO:+--repo "$REPO"} > "$DIFF"
 PLAN=$(python3 "$HERE/super-board-merge-policy.py" --config "$CONFIG" --meta "$META" --diff "$DIFF") || {
+  if [ "$(echo "$CONFIG_JSON" | jq -r '.governance.enabled // false')" = true ]; then
+    say "risk classification unavailable — retain Review; no human request"; exit 9
+  fi
   echo "human-gate: policy — could not classify the PR (unreadable metadata)"
   say "merge policy could not be evaluated — a human merges this one"; exit 7; }
+
+# The separate governance-verdict step was retired 2026-10-14 (owner decision). The merge decision is the
+# Reviewer's, on evidence: QA green + review findings clean + security S1+S2 clean + truth at
+# threshold. No separate governance record is required, so a non-CRITICAL PR merges on the
+# Reviewer's verdict instead of bouncing to another model or back to the owner. Only
+# PLAN.human (destructive-only) and PLAN.needs_you remain as gates, checked below.
 
 # The label is display-only. A request posted before `done` pins the exact head
 # and policy/commands. Re-read trusted approval evidence; never mint it here.
@@ -278,16 +280,21 @@ if ! git -C "$SCRATCH" merge "origin/${BASE}" --no-edit --quiet 2>/dev/null; the
   exit 5
 fi
 
-for cmd in "${VERIFY[@]}"; do
-  say "verify: ${cmd}"
-  if ! ( cd "$SCRATCH" && eval "$cmd" ) >"$SCRATCH/.verify.log" 2>&1; then
-    say "FAILED: ${cmd}"
-    tail -30 "$SCRATCH/.verify.log" >&2
-    say "the branch is stale against ${BASE} — send it back to Build for a rebase pass"
-    exit 2
-  fi
-done
-say "verified green against ${BASE} (${#VERIFY[@]} command(s))"
+if [ "${#VERIFY[@]}" -eq 0 ]; then
+  say "WARNING: config.verify_commands is empty — the base merges cleanly, but"
+  say "WARNING: nothing proved the result BUILDS. A clean merge is not a green build."
+else
+  for cmd in "${VERIFY[@]:-}"; do
+    say "verify: ${cmd}"
+    if ! ( cd "$SCRATCH" && eval "$cmd" ) >"$SCRATCH/.verify.log" 2>&1; then
+      say "FAILED: ${cmd}"
+      tail -30 "$SCRATCH/.verify.log" >&2
+      say "the branch is stale against ${BASE} — send it back to Build for a rebase pass"
+      exit 2
+    fi
+  done
+  say "verified green against ${BASE} (${#VERIFY[@]} command(s))"
+fi
 
 python3 "$GITHUB_READ" --check
 
@@ -334,6 +341,17 @@ if [ "$APPROVED" = true ]; then
     approval_request
     say "human approval changed during verification; keep the card Blocked"
     if [ -n "$HUMAN" ]; then exit 7; else exit 8; fi
+  fi
+fi
+
+# Refresh metadata and governance even when no human approval was required.
+# Classification and evidence can change while verification holds the merge lock.
+if [ "$(echo "$CONFIG_JSON" | jq -r '.governance.enabled // false')" = true ]; then
+  python3 "$GITHUB_READ" --kind metadata -- pr view "$PR" ${REPO:+--repo "$REPO"} --json labels,files,additions,deletions,changedFiles,body > "$META"
+  PLAN=$(python3 "$HERE/super-board-merge-policy.py" --config "$CONFIG" --meta "$META" --diff "$DIFF") || exit 9
+  if [ "$(echo "$PLAN" | jq '(.human | length) + (.needs_you | length)')" -gt 0 ]; then
+    approval_check
+    [ "$APPROVED" = true ] || { approval_request; exit 7; }
   fi
 fi
 

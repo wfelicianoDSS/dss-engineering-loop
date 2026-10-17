@@ -3,9 +3,10 @@
 # harness (provider: deepseek), running with REAL tools (bash, edit, read, …).
 #
 # Same fallback-only contract as super-board-codex-lane.sh: Review is always
-# refused here — fallback workers may Build/QA, never own Review or merge.
+# refused here — fallback workers may Build/QA/Groom, never own Review or merge.
 #
-# Usage: --config f --card '<JSON>' --lane build|qa [--model <model>]
+# Usage: --config f --lane build|qa|groom [--card '<JSON>'] [--model <model>]
+#   --card is required for build/qa and omitted for groom (the Backlog → Ready lane).
 # Model: --model wins; else config.deepseek.model; else a fixed default.
 #        The "deepseek/" provider prefix is added automatically when missing.
 # Binary: $SUPER_BOARD_OPENCODE_BIN, else the newest ~/.opencode/versions/1.*/opencode[.exe],
@@ -30,11 +31,13 @@ def fail(message, code=64):
 LEG = 'deepseek'
 PROVIDER = 'deepseek'
 DEFAULT_MODEL = 'deepseek-flash'
+SKILL = {'build': 'super-build', 'qa': 'super-qa', 'groom': 'super-groom'}
+SECTION = {'build': 'Builder', 'qa': 'Tester', 'groom': 'Super Groom'}
 
 parser = argparse.ArgumentParser(description='Run one DeepSeek board lane via the OpenCode harness (fallback only; never Review).')
 parser.add_argument('--config', required=True)
-parser.add_argument('--card', required=True, help='card JSON or a JSON file')
-parser.add_argument('--lane', required=True, choices=['build', 'qa'])
+parser.add_argument('--card', help='card JSON or a JSON file (required for build/qa)')
+parser.add_argument('--lane', required=True, choices=['build', 'qa', 'groom'])
 parser.add_argument('--model')
 args = parser.parse_args(sys.argv[2:])
 script_path = Path(sys.argv[1]).resolve()
@@ -42,12 +45,22 @@ script_path = Path(sys.argv[1]).resolve()
 try:
     config_path = Path(args.config).resolve()
     config = json.loads(config_path.read_text())
-    card = json.loads(args.card if args.card.lstrip().startswith('{') else Path(args.card).read_text())
-    if not isinstance(config, dict) or not isinstance(card, dict):
-        raise ValueError('config/card must be objects')
-    if type(card.get('number')) is not int or card['number'] < 1 or not isinstance(card.get('status'), str):
-        raise ValueError('card needs a positive issue number and status')
-    if config.get('usage_fallback') != LEG and LEG not in (config.get('usage_fallback') or []):
+    if not isinstance(config, dict):
+        raise ValueError('config must be an object')
+    card = None
+    if args.lane != 'groom':
+        card = json.loads(args.card if args.card and args.card.lstrip().startswith('{') else Path(args.card).read_text())
+        if not isinstance(card, dict):
+            raise ValueError('card must be an object')
+        if type(card.get('number')) is not int or card['number'] < 1 or not isinstance(card.get('status'), str):
+            raise ValueError('card needs a positive issue number and status')
+    if args.lane == 'groom':
+        # The groom lane (Backlog → Ready) is authorized by groom.providers, not usage_fallback:
+        # it must keep feeding Ready even when the paid build/qa legs are turned off, or the
+        # board starves (2026-10-15).
+        if LEG not in ((config.get('groom') or {}).get('providers') or []):
+            fail(f'groom refused: "{LEG}" is not in groom.providers in {config_path}.', 78)
+    elif config.get('usage_fallback') != LEG and LEG not in (config.get('usage_fallback') or []):
         fail(f'DeepSeek fallback refused: usage_fallback does not include "{LEG}" in {config_path}.', 78)
     configured = (config.get(LEG) or {}).get('model')
     if configured is not None and not isinstance(configured, str):
@@ -92,7 +105,7 @@ except subprocess.CalledProcessError:
     fail('DeepSeek lane must start inside the target git repository')
 os.chdir(root)
 helper = script_path.with_name('super-board-github-read.py')
-column = card['status']
+column = card['status'] if card else 'Backlog'
 
 
 def result(status, detail):
@@ -103,11 +116,12 @@ if not helper.exists() or subprocess.run([sys.executable, str(helper), '--check'
     result('halted', 'required GitHub reads halted or helper missing; preserve claims and worktrees')
     sys.exit(79)
 
-skill = {'build': 'super-build', 'qa': 'super-qa'}[args.lane]
-section = {'build': 'Builder', 'qa': 'Tester'}[args.lane]
-prompt = f'''Run {skill} for issue #{card['number']} as a DeepSeek lane worker (model: {model}).
+skill = SKILL[args.lane]
+section = SECTION[args.lane]
+target = f"issue #{card['number']}" if card else "the board"
+prompt = f'''Run {skill} for {target} as a DeepSeek lane worker (model: {model}).
 Config: {config_path}
-Card: {json.dumps(card)}
+Card: {json.dumps(card) if card else 'none (Backlog → Ready grooming lane)'}
 Read .claude/skills/{skill}/SKILL.md and .claude/skills/super-board/references/run.md → {section} lifecycle; follow all its board, branch, worktree, comments, test and merge requirements.
 Source .claude/bin/super-board-gh-guard.sh and use its quota checks. Required GitHub reads go through .claude/bin/super-board-github-read.py; a read that misses its --kind shape exits 64 for that call only and prints the valid form, so fix the read. Check --check before new writes, migrations and merges; exit 79 means status=halted, no more GitHub calls, preserve claims/worktree/card/approval. Never retry a mutation.
 Use .claude/bin/super-board-card.sh for board reads/moves and .claude/bin/super-board-pr-body.sh for owned PR blocks; follow writing-standard.md and pr-author-notes.md.

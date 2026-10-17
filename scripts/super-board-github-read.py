@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded, read-only GitHub evidence. Exit 79 stops this repository's board run.
+"""Bounded, read-only GitHub evidence. Exit 79 halts the selected evidence scope.
 
 A logical read gets three total attempts. Success resets its own sequence; other
 reads cannot reset it. Permanent query/auth errors stop on the first attempt.
@@ -56,8 +56,20 @@ def halt_path():
     return root / '.claude/super-board/github-halt.json'
 
 
+def global_halt_path():
+    explicit = os.environ.get('SB_GITHUB_GLOBAL_HALT_FILE')
+    if explicit:
+        return Path(explicit)
+    scoped = os.environ.pop('SB_GITHUB_HALT_FILE', None)
+    try:
+        return halt_path()
+    finally:
+        if scoped is not None:
+            os.environ['SB_GITHUB_HALT_FILE'] = scoped
+
+
 def check_halt():
-    if halt_path().exists():
+    if halt_path().exists() or global_halt_path().exists():
         raise ReadHalted('GitHub reads are halted; inspect the saved reason and explicitly restart the run')
 
 
@@ -122,7 +134,7 @@ def no_errors(value):
         raise GitHubErrors('GraphQL returned errors with incomplete data')
 
 
-def validate(text, kind, meta=None):
+def validate(text, kind, meta=None, requested=None):
     if kind == 'scalar':
         require(bool(text.strip()), 'required value missing')
         return text
@@ -136,13 +148,23 @@ def validate(text, kind, meta=None):
         require(text.strip() in ('OPEN', 'CLOSED'), 'missing issue state')
         return text
     if kind == 'diff':
-        require(isinstance(meta, dict), 'diff metadata missing')
-        files = meta['files']
-        if not files:
+        if not isinstance(meta, dict):
+            # A worker may read a diff without supplying --meta (e.g. `gh pr diff`, or
+            # `gh api ...pulls/N -H Accept: application/vnd.github.diff`). Missing metadata is a
+            # caller quirk, not missing evidence, so return the diff instead of halting the card.
+            return text
+        files = meta.get('files') or []
+        # `gh pr view --json files` caps at ~100 entries, so meta['files'] can be SHORTER than
+        # the real file count while `gh pr diff` returns every file. Compare the diff's
+        # `diff --git` count against changedFiles (authoritative), not the possibly-truncated
+        # list — a >100-file PR (e.g. #546, 128 files) otherwise read as "diff file list
+        # incomplete" and halted the card (2026-10-14).
+        expected = meta.get('changedFiles', len(files))
+        if expected == 0:
             require(not text.strip() and meta['additions'] == meta['deletions'] == 0, 'diff and file list disagree')
             return text
         lines = text.splitlines()
-        require(sum(line.startswith('diff --git ') for line in lines) == len(files), 'diff file list incomplete')
+        require(sum(line.startswith('diff --git ') for line in lines) == expected, 'diff file list incomplete')
         added = removed = 0
         old_left = new_left = 0
         for line in lines:
@@ -176,7 +198,10 @@ def validate(text, kind, meta=None):
         require(isinstance(value.get('files'), list) and isinstance(value.get('labels'), list)
                 and isinstance(value.get('body'), str), 'PR policy fields missing')
         require(all(type(value.get(k)) is int and value[k] >= 0 for k in ('additions', 'deletions', 'changedFiles')), 'PR counts missing')
-        require(value['changedFiles'] == len(value['files']), 'PR file list truncated')
+        # gh pr view --json files caps at ~100 entries, so a large PR legitimately returns fewer
+        # files than changedFiles. Truncation above the counts is fine; only a file list LONGER
+        # than changedFiles is inconsistent.
+        require(value['changedFiles'] >= len(value['files']), 'PR file list longer than changedFiles')
         require(all(isinstance(f, dict) and isinstance(f.get('path'), str) and f['path'] for f in value['files']), 'PR paths missing')
         require(all(isinstance(l, dict) and isinstance(l.get('name'), str) for l in value['labels']), 'PR labels missing')
     elif kind == 'items':
@@ -213,26 +238,6 @@ def validate(text, kind, meta=None):
                         and isinstance(n.get('title'), str) and n.get('state') == 'OPEN'
                         and isinstance(n.get('comments', {}).get('nodes'), list)
                         and isinstance(n.get('labels', {}).get('nodes'), list) for n in nodes), 'dependency issue fields missing')
-    elif kind == 'issue-history':
-        require(isinstance(value, list) and bool(value), 'issue history pages missing')
-        numbers, cursors, total = set(), set(), None
-        for index, page in enumerate(value):
-            connection = page['data']['repository']['issues']
-            nodes, info, count = connection['nodes'], connection['pageInfo'], connection['totalCount']
-            require(type(count) is int and count >= 0 and (total is None or total == count), 'issue count changed during pagination')
-            total = count
-            require(isinstance(nodes, list) and type(info['hasNextPage']) is bool, 'issue history page malformed')
-            require(info['hasNextPage'] == (index < len(value) - 1), 'issue history pagination incomplete')
-            if info['hasNextPage']:
-                cursor = info.get('endCursor')
-                require(isinstance(cursor, str) and cursor and cursor not in cursors, 'issue history cursor repeated/missing')
-                cursors.add(cursor)
-            for node in nodes:
-                require(isinstance(node, dict) and type(node.get('number')) is int and node['number'] > 0
-                        and node['number'] not in numbers and node.get('state') in ('OPEN', 'CLOSED')
-                        and isinstance(node.get('body'), str), 'issue history fields missing/duplicate')
-                numbers.add(node['number'])
-        require(len(numbers) == total, 'issue history count incomplete')
     elif kind == 'quota':
         resources = value['resources']
         for bucket in ('graphql', 'core'):
@@ -243,10 +248,7 @@ def validate(text, kind, meta=None):
     elif kind == 'project':
         require(isinstance(value, dict) and isinstance(value.get('id'), str) and value['id'], 'project ID missing')
     elif kind == 'fields':
-        require(isinstance(value.get('fields'), list) and any(isinstance(f, dict) and f.get('name') == 'Status' and f.get('id') and isinstance(f.get('options'), list) for f in value['fields']), 'Status field missing')
-        status = next(f for f in value['fields'] if f.get('name') == 'Status')
-        require(all(isinstance(o, dict) and isinstance(o.get('id'), str) and o['id']
-                    and isinstance(o.get('name'), str) and o['name'] for o in status['options']), 'Status option identity missing')
+        require(isinstance(value.get('fields'), list) and any(f.get('name') == 'Status' and f.get('id') and isinstance(f.get('options'), list) for f in value['fields']), 'Status field missing')
     elif kind == 'status-field':
         data = value['data']
         owner = data.get('user') or data.get('organization')
@@ -272,27 +274,58 @@ def validate(text, kind, meta=None):
             require(isinstance(links['nodes'], list), 'linked issues missing')
         require(len(heads) == 1, 'PR changed during approval read')
     elif kind == 'merge-state':
-        require(value.get('state') in ('OPEN', 'CLOSED', 'MERGED') and re.fullmatch(r'[0-9a-f]{40}', value.get('headRefOid', '')), 'merge outcome unreadable')
+        require(value.get('state') in ('OPEN', 'CLOSED', 'MERGED'), 'merge outcome unreadable')
+        # headRefOid is optional: the merge gate requests it (to bind the head), but the
+        # post-merge verification legitimately reads only `--json state,mergeCommit`. Demanding
+        # headRefOid made the helper report "merge outcome unreadable" for a valid read, and the
+        # runner blocked already-merged cards (2026-10-15, #233 / PR #609). Validate it if present.
+        if 'headRefOid' in value:
+            require(re.fullmatch(r'[0-9a-f]{40}', value.get('headRefOid') or ''), 'merge outcome unreadable')
         if value['state'] == 'MERGED':
             require(re.fullmatch(r'[0-9a-f]{40}', (value.get('mergeCommit') or {}).get('oid', '')), 'merged commit missing')
     elif kind == 'body':
         require(isinstance(value.get('body'), str) and re.fullmatch(r'[0-9a-f]{40}', value.get('headRefOid', '')), 'PR body/head missing')
     elif kind == 'dedupe':
         require(isinstance(value, list) and len(value) < 200, 'dedupe list missing or capped; fetch complete issue history before creating')
-        require(all(isinstance(i, dict) and type(i.get('number')) is int and i['number'] > 0 and isinstance(i.get('body'), str) for i in value), 'dedupe issue fields missing')
+        # Validate the fields the CALLER actually requested (a title/state projection OR body
+        # evidence) — never demand `body` from a `--json number,title,state,url` read. An issue
+        # with no description returns `body: null`, which is valid, not malformed.
+        # (2026-10-15/16: hard-requiring `body` halted the board on such a dedupe read.)
+        fields = {'number', 'body'} if requested is None else requested
+        for entry in value:
+            require(isinstance(entry, dict) and type(entry.get('number')) is int and entry['number'] > 0,
+                    'dedupe issue fields missing')
+            for field in fields - {'number'}:
+                require(field in entry, f'dedupe issue {field} missing')
+                if field == 'body':
+                    require(entry[field] is None or isinstance(entry[field], str), 'dedupe body malformed')
+                elif field in ('title', 'url', 'state'):
+                    require(isinstance(entry[field], str), f'dedupe issue {field} malformed')
     elif kind in ('prs-open', 'prs-merged', 'issues-closed', 'issue'):
         entries = [value] if kind == 'issue' else value
         require(isinstance(entries, list), 'required issue/PR list missing')
+        # REST --paginate --slurp returns an array of pages. Validate every
+        # issue inside those pages while preserving the original output shape.
+        if kind != 'issue' and entries and isinstance(entries[0], list):
+            require(all(isinstance(page, list) for page in entries), 'issue/PR pages malformed')
+            entries = [entry for page in entries for entry in page]
         for entry in entries:
-            require(isinstance(entry, dict) and type(entry.get('number')) is int and entry['number'] > 0
-                    and isinstance(entry.get('title'), str) and isinstance(entry.get('body'), str), 'issue/PR identity or body missing')
-            if kind.startswith('prs-'):
-                require(isinstance(entry.get('url'), str), 'PR URL missing')
-            if kind == 'prs-open':
-                require(isinstance(entry.get('headRefName'), str) and entry['headRefName'] and isinstance(entry.get('files'), list)
-                        and all(isinstance(f, dict) and isinstance(f.get('path'), str) and f['path'] for f in entry['files']), 'open PR branch/files missing')
-            if kind == 'issues-closed':
-                require(entry.get('stateReason') in ('COMPLETED', 'NOT_PLANNED', 'REOPENED', None) and 'stateReason' in entry, 'closed issue reason missing')
+            require(isinstance(entry, dict) and type(entry.get('number')) is int and entry['number'] > 0,
+                    'issue/PR identity missing')
+            fields = set(entry) if requested is None else requested
+            for field in fields - {'number'}:
+                require(field in entry, f'requested {field} missing')
+                if field == 'body':
+                    # An issue/PR with no description is `null`, not malformed.
+                    require(entry[field] is None or isinstance(entry[field], str), 'body malformed')
+                elif field in ('title', 'url', 'headRefName'):
+                    require(isinstance(entry[field], str), f'{field} malformed')
+                elif field == 'headRefOid':
+                    require(isinstance(entry[field], str) and re.fullmatch(r'[0-9a-f]{40}', entry[field]), 'PR head malformed')
+                elif field == 'files':
+                    require(isinstance(entry[field], list) and all(isinstance(f, dict) and isinstance(f.get('path'), str) and f['path'] for f in entry[field]), 'PR files malformed')
+                elif field == 'stateReason':
+                    require(entry[field] in ('COMPLETED', 'NOT_PLANNED', 'REOPENED', 'DUPLICATE', None), 'closed issue reason malformed')
     elif kind == 'object':
         require(isinstance(value, dict) and bool(value), 'required object missing')
     elif kind == 'array':
@@ -300,11 +333,58 @@ def validate(text, kind, meta=None):
     return value
 
 
+def normalize_args(args):
+    # `gh api` rejects --slurp together with --jq/--template ("the --slurp option is not
+    # supported with --jq or --template"). Workers sometimes combine them, which made the
+    # call fail and halted the run. Drop the transform so the read returns the raw slurped
+    # payload the validator expects (e.g. --kind comments wants the paginated page list).
+    if '--slurp' in args:
+        out, i = [], 0
+        while i < len(args):
+            a = args[i]
+            if a in ('--jq', '-q', '--template', '-t'):
+                i += 2; continue
+            if a.startswith('--jq=') or a.startswith('--template='):
+                i += 1; continue
+            out.append(a); i += 1
+        args = out
+    # `gh pr diff` refuses to print a diff whose content contains ANSI escape sequences unless
+    # told to. Builders sometimes commit colored terminal captures as evidence logs, which then
+    # fails every diff read (and the merge gate). Allow them so the read succeeds.
+    if len(args) >= 2 and args[0] == 'pr' and args[1] == 'diff' and '--allow-escape-sequences' not in args:
+        args = list(args) + ['--allow-escape-sequences']
+    return args
+
+
+def requested_fields(args):
+    for index, arg in enumerate(args):
+        if arg == '--json' and index + 1 < len(args):
+            return set(args[index + 1].split(','))
+        if arg.startswith('--json='):
+            return set(arg[7:].split(','))
+    return None
+
+
+def needs_json(args):
+    # `gh issue/pr list|view` and `gh search` print a human table unless `--json` is given. A
+    # caller that omits it makes json.loads fail; under SB_GITHUB_READ_STRICT that HALTED the whole
+    # board (2026-10-15). Treat the omission as a caller error for THIS call (exit 64), never a halt.
+    for a, b in zip(args, args[1:]):
+        if a in ('issue', 'pr') and b in ('list', 'view'):
+            return True
+    return 'search' in args
+
+
 def read(args, kind='json', meta=None, recovering=False):
     if not read_only(args):
         raise ValueError('retry helper accepts read-only GitHub commands only')
+    args = normalize_args(args)
     if not recovering:
         check_halt()
+    if '--json' not in args and needs_json(args):
+        raise ValueError(
+            f'this read needs --json — a gh table is not JSON. Use --kind {kind} -- '
+            f'{FORMS.get(kind, "<gh> … --json …")}')
     operation = {'args': args, 'kind': kind, 'meta': meta}
     last = 'GitHub read failed'
     shape_only = True  # every attempt reached GitHub and got a payload of the wrong shape
@@ -331,7 +411,7 @@ def read(args, kind='json', meta=None, recovering=False):
                 last = 'GitHub required read failed' + (f' ({status[0]})' if status else '')
             else:
                 try:
-                    value = validate(result.stdout, kind, meta)
+                    value = validate(result.stdout, kind, meta, requested_fields(args))
                     if not recovering:
                         check_halt()
                     return result.stdout, value
@@ -351,8 +431,7 @@ def read(args, kind='json', meta=None, recovering=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--kind', choices=('json','scalar','issue-number','head','state','diff','metadata','items','issues','issue-history','quota','projects','project','fields','status-field','permission','comments','approval','merge-state','body','dedupe','prs-open','prs-merged','issues-closed','issue','object','array'))
-    parser.add_argument('--issue-history', help='complete paginated all-state issue history for owner/name')
+    parser.add_argument('--kind', choices=('json','scalar','issue-number','head','state','diff','metadata','items','issues','quota','projects','project','fields','status-field','permission','comments','approval','merge-state','body','dedupe','prs-open','prs-merged','issues-closed','issue','object','array'))
     parser.add_argument('--meta')
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--halt', help='record an unresolved mutation outcome and stop; never retry it')
@@ -362,6 +441,7 @@ def main():
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     try:
         if args.halt:
+            os.environ['SB_GITHUB_HALT_FILE'] = str(global_halt_path())
             halt(args.halt, 1)
         if args.resume:
             path = halt_path()
@@ -384,13 +464,6 @@ def main():
             return 0
         if args.check:
             check_halt()
-            return 0
-        if args.issue_history:
-            require(re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', args.issue_history) is not None, 'issue history requires owner/name')
-            owner, repo = args.issue_history.split('/')
-            query = 'query($owner:String!,$repo:String!,$endCursor:String){repository(owner:$owner,name:$repo){issues(first:100,after:$endCursor,states:[OPEN,CLOSED]){totalCount pageInfo{hasNextPage endCursor} nodes{number state body}}}}'
-            _, pages = read(['api','graphql','--paginate','--slurp','-f','query='+query,'-F','owner='+owner,'-F','repo='+repo], 'issue-history')
-            print(json.dumps([n for page in pages for n in page['data']['repository']['issues']['nodes']]))
             return 0
         meta = json.loads(Path(args.meta).read_text()) if args.meta else None
         output, _ = read(command, args.kind or 'json', meta)

@@ -65,15 +65,23 @@ case "$MODE" in
   *) echo "usage: super-board-usage.sh record | check [--config f] [--threshold N] [--max-age S]" >&2; exit 64 ;;
 esac
 
-THRESHOLD=""; MAX_AGE=900; CONFIG=""
+THRESHOLD=""; MAX_AGE=900; CONFIG=""; PROVIDER=claude
 while [ $# -gt 0 ]; do
   case "$1" in
+    --provider)  PROVIDER="$2"; shift 2 ;;
     --config)    CONFIG="$2"; shift 2 ;;
     --threshold) THRESHOLD="$2"; shift 2 ;;
     --max-age)   MAX_AGE="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 64 ;;
   esac
 done
+case "$PROVIDER" in
+  claude) FILE="${SB_CLAUDE_USAGE_FILE:-$FILE}" ;;
+  codex) FILE="${SB_CODEX_USAGE_FILE:-$HOME/.codex/super-board/usage.json}" ;;
+  *) echo "unsupported provider: $PROVIDER" >&2; exit 64 ;;
+esac
+# Codex snapshots use the same explicit recorded_at/rate_limits contract.
+# A missing snapshot is unknown; transcript token counts are not plan usage.
 if [ -z "$THRESHOLD" ] && [ -n "$CONFIG" ] && [ -f "$CONFIG" ]; then
   THRESHOLD=$(jq -r '.usage_pause_pct // empty' "$CONFIG")
 fi
@@ -85,7 +93,8 @@ if [ ! -f "$FILE" ]; then
 fi
 
 OUT=$(jq -c --argjson th "$THRESHOLD" --argjson maxage "$MAX_AGE" '
-  (now | floor) as $now
+  .recorded_at as $recorded_at
+  | (now | floor) as $now
   | ($now - (.recorded_at // 0)) as $age
   # A window whose reset time has passed is a fresh window: drop it.
   | [ (.rate_limits // {}) | to_entries[]
@@ -108,7 +117,7 @@ OUT=$(jq -c --argjson th "$THRESHOLD" --argjson maxage "$MAX_AGE" '
       ($w | sort_by(.used) | last) + { state: "ok", age: $age,
         reason: "highest window \(($w | sort_by(.used) | last).window) at \(($w | sort_by(.used) | last).used)%" }
     end
-  | { state, window, used, resets_at, age, reason }' "$FILE" 2>/dev/null) || {
+  | { state, window, used, resets_at, age, reason, recorded_at: $recorded_at }' "$FILE" 2>/dev/null) || {
   echo '{"state":"unknown","window":null,"used":null,"resets_at":null,"age":null,"reason":"usage snapshot is unreadable"}'
   exit 3; }
 

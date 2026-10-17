@@ -8,7 +8,6 @@
 set -euo pipefail
 exec python3 - "${BASH_SOURCE[0]}" "$@" <<'PY'
 import argparse
-import importlib.util
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
@@ -59,40 +58,7 @@ try:
     pinned = codex[0].startswith('--codex=') or (isinstance(configured, str) and configured.strip())
 except (OSError, ValueError, subprocess.CalledProcessError) as error:
     parser.error(str(error))
-readiness = launcher.with_name('super-board-verification-ready.py')
-if subprocess.run([sys.executable, str(readiness), '--config', str(config_path)]).returncode:
-    result = json.dumps({'cards': [dict(number=c['number'], finalStatus='halted', lastLane='none',
-                                       column=c['status'], detail='verification-readiness: repair verify_commands and restart explicitly',
-                                       lanesRun='none:halted') for c in cards], 'halted': True})
-    if output_path:
-        output_path.write_text(result + '\n')
-    print(result)
-    sys.exit(9)
 os.chdir(root)
-resolver_path = launcher.with_name('super-board-skills-ready.py')
-try:
-    spec = importlib.util.spec_from_file_location('skills_ready', resolver_path)
-    resolver = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(resolver)
-    resolver.hydrate(cards, root)
-    skills = resolver.report(root, 'codex', cards, home=os.environ.get('SUPER_BOARD_SKILLS_HOME'),
-                             catalog=os.environ.get('SUPER_BOARD_SKILLS_CATALOG'))
-except SystemExit as error:
-    code, detail = error.code, 'required GitHub reads halted while hydrating skills; preserve claims and worktrees'
-except (OSError, ValueError, TypeError, KeyError) as error:
-    code, detail = 64, 'skills-readiness: ' + str(error)
-else:
-    code = 0 if skills['ready'] else 10
-    detail = 'skills-readiness: missing ' + ', '.join(dict.fromkeys(e['name'] for e in skills['entries'] if e['status'] == 'missing'))
-if code:
-    result = json.dumps(dict(cards=[dict(number=c['number'], finalStatus='halted', lastLane='none', column=c['status'],
-                                       detail=detail, lanesRun='none:halted') for c in cards], halted=True))
-    if output_path:
-        output_path.write_text(result + '\n')
-    print(result)
-    sys.exit(code)
-readiness_halted = threading.Event()
-skills_halted = threading.Event()
 halted = threading.Event()
 mutex = threading.RLock()
 active = set()
@@ -192,14 +158,6 @@ def run_card(card):
             if halted.is_set():
                 history.append(dict(lane='none', status='halted', column=current['status'], detail='run halted; preserve claims and worktrees'))
                 break
-            boundary = resolver.report(root, 'codex', [current], lane=lane,
-                                       home=os.environ.get('SUPER_BOARD_SKILLS_HOME'), catalog=os.environ.get('SUPER_BOARD_SKILLS_CATALOG'))
-            if not boundary['ready']:
-                skills_halted.set()
-                halted.set()
-                history.append(dict(lane=lane, status='halted', column=current['status'],
-                                    detail='skills-readiness: missing ' + ', '.join(e['name'] for e in boundary['entries'] if e['status'] == 'missing')))
-                break
             process = None
             lock = inflight / str(card['number'])
             try:
@@ -220,12 +178,8 @@ def run_card(card):
                 history.append(dict(lane=lane, status='failed', column=current['status'],
                                     detail=f'could not start {lane} lane: {error}'))
                 break
-        preserve_lock = False
         try:
             stdout, _ = process.communicate()
-            if process.returncode in (9, 10):
-                preserve_lock = True
-                (readiness_halted if process.returncode == 9 else skills_halted).set()
             try:
                 result = json.loads(stdout)
                 if (not isinstance(result, dict) or result.get('status') not in
@@ -235,7 +189,7 @@ def run_card(card):
                 if process.returncode and result['status'] != 'halted':
                     raise ValueError(f'lane exited {process.returncode}')
             except (ValueError, TypeError):
-                result = dict(status='halted' if process.returncode in (9, 10, 79) or halted.is_set() else 'failed',
+                result = dict(status='halted' if process.returncode == 79 or halted.is_set() else 'failed',
                               column=current['status'], detail=f'{lane} lane returned no valid result (exit {process.returncode})')
             with mutex:
                 if result['status'] == 'halted':
@@ -249,10 +203,9 @@ def run_card(card):
                 history[-1].update(status='failed', detail=f'{lane} claimed advanced without reaching {expected}')
                 break
             current['status'] = result['column']
-            current.pop('lane', None)
         finally:
             try:
-                if not preserve_lock and lock.read_text().startswith(f'PID={process.pid}\n'):
+                if lock.read_text().startswith(f'PID={process.pid}\n'):
                     lock.unlink()
             except FileNotFoundError:
                 pass
@@ -275,5 +228,5 @@ try:
 finally:
     if marker.exists() and marker.read_text().strip() == owner:
         marker.unlink()
-sys.exit(10 if skills_halted.is_set() else 9 if readiness_halted.is_set() else 79 if halted.is_set() else 0)
+sys.exit(79 if halted.is_set() else 0)
 PY

@@ -81,9 +81,23 @@ for n in ${ISSUES//,/ }; do
   TARGETS=$(jq -c --argjson one "$one" '. + [$one]' <<<"$TARGETS")
 done
 
-jq -n --argjson targets "$TARGETS" --argjson merged "$MERGED" --argjson open "$OPEN" \
-      --argjson closed "$CLOSED" --argjson cards "$CARDS" --arg files "$FILES" \
+# Hand the large reads to jq through FILES, never argv: a single --argjson value over
+# Linux's MAX_ARG_STRLEN (~128 KB) makes exec fail with "Argument list too long" (E2BIG).
+PF_TMP=$(mktemp -d)
+trap 'rm -rf "$PF_TMP"' EXIT
+printf '%s' "$TARGETS" > "$PF_TMP/targets.json"
+printf '%s' "$MERGED"  > "$PF_TMP/merged.json"
+printf '%s' "$OPEN"    > "$PF_TMP/open.json"
+printf '%s' "$CLOSED"  > "$PF_TMP/closed.json"
+printf '%s' "$CARDS"   > "$PF_TMP/cards.json"
+
+jq -n --slurpfile targets "$PF_TMP/targets.json" --slurpfile merged "$PF_TMP/merged.json" \
+      --slurpfile open "$PF_TMP/open.json" --slurpfile closed "$PF_TMP/closed.json" \
+      --slurpfile cards "$PF_TMP/cards.json" --arg files "$FILES" \
       --argjson th "$THRESHOLD" '
+  ($targets[0]) as $targets | ($merged[0]) as $merged | ($open[0]) as $open
+  | ($closed[0]) as $closed | ($cards[0]) as $cards
+  |
   def stop: ["the","and","for","with","from","into","when","that","this","add","fix","make","use","should","not","are","can","new"];
   def toks: ascii_downcase | [scan("[a-z0-9]+")] | map(select(length > 2)) | . - stop | unique;
   def sim($a; $b): ($a | toks) as $x | ($b | toks) as $y

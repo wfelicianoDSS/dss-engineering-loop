@@ -9,6 +9,11 @@ config, the PR metadata and the diff; no network, no side effects.
 `--meta` is `gh pr view --json labels,files,additions,deletions,body`.
 `--diff` is `gh pr diff` (only ADDED lines are searched for keywords).
 
+Governance-enabled configs additionally return risk and risk_reasons. They classify
+added and removed lines (excluding generated EF Down inverse operations), reserve
+human for CRITICAL categories, and route oversized PRs to HIGH specialist scrutiny.
+Legacy rules below apply only when governance is disabled.
+
 Stdout, one JSON object:
     { "human":      [ {"category": "money", "why": "path src/billing/charge.ts"} ],
       "migrations": [ "supabase/migrations/2026_add_col.sql" ],
@@ -106,6 +111,71 @@ def matches(path: str, globs) -> str | None:
     return None
 
 
+# Keyword gates (destructive-data, auth, money) must scan CODE, not the test-evidence and
+# doc artifacts the board commits. A QA log that merely quotes SQL (`DELETE FROM ...`) or an
+# identifier tripped the destructive-data human gate on a clean PR (2026-10-15), so added/removed
+# lines under these paths are skipped. Override with merge_policy.keyword_exclude.
+DEFAULT_KEYWORD_EXCLUDE = [
+    "docs/**", "**/*.md", "**/*.log", "**/*.txt",
+    "**/__snapshots__/**", "**/*.snap",
+    # Test code legitimately contains SQL strings (e.g. proving a FK RESTRICT blocks a
+    # cascade); a `DELETE FROM` literal there is not a destructive production operation.
+    "**/tests/**", "**/test/**",
+    "**/package-lock.json", "**/bun.lock", "**/yarn.lock", "**/pnpm-lock.yaml",
+]
+
+
+def added_text(diff: str, excl) -> str:
+    parts, path = [], None
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            p = line[4:].strip()
+            path = p[2:] if p.startswith("b/") else p
+        elif line.startswith("+") and not line.startswith("+++"):
+            if path is None or not matches(path, excl):
+                parts.append(line[1:])
+    return "\n".join(parts).lower()
+
+
+def rule_hits(rules, labels, paths, changed):
+    hits = []
+    for category, rule in rules.items():
+        hit = next((f"label {label}" for label in rule.get("labels", [])
+                    if label.lower() in labels), None)
+        hit = hit or next((f"path {path}" for path in paths
+                           if matches(path, rule.get("paths"))), None)
+        hit = hit or next((f"keyword {keyword}" for keyword in rule.get("keywords", [])
+                           if keyword.lower() in changed), None)
+        if hit:
+            hits.append({"category": category, "why": hit})
+    return hits
+
+
+def governance_changes(diff, excl=()):
+    # Generated EF rollback methods contain inverse destructive operations.
+    # Only their forward Up operations classify destructive migration risk.
+    # Evidence/doc/log paths are skipped: they only quote identifiers/SQL.
+    changed, rollback, migration, path = [], False, False, None
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            rollback = False
+            migration = "/migrations/" in line.lower()
+            path = None
+        elif line.startswith("+++ "):
+            p = line[4:].strip()
+            path = p[2:] if p.startswith("b/") else p
+        if migration and "protected override void Down(" in line:
+            rollback = True
+        if migration and "protected override void Up(" in line:
+            rollback = False
+        inverse = rollback and re.search(
+            r"migrationBuilder\.(DropColumn|DropTable|DropIndex|DropForeignKey|RenameColumn|RenameTable|RenameIndex|AlterColumn)\s*\(", line)
+        if not inverse and line[:1] in ("+", "-") and not line.startswith(("+++", "---")):
+            if path is None or not matches(path, excl):
+                changed.append(line[1:])
+    return "\n".join(changed).lower()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -124,8 +194,9 @@ def main() -> int:
 
     labels = {(l.get("name") or "").lower() for l in meta.get("labels") or []}
     paths = [f.get("path") or "" for f in meta.get("files") or []]
-    added = "\n".join(l[1:] for l in diff.splitlines()
-                      if l.startswith("+") and not l.startswith("+++")).lower()
+    kw_excl = (cfg.get("merge_policy") or {}).get("keyword_exclude")
+    kw_excl = DEFAULT_KEYWORD_EXCLUDE if kw_excl is None else kw_excl
+    added = added_text(diff, kw_excl)
     body = meta.get("body") or ""
 
     policy = cfg.get("merge_policy") or {}
@@ -169,6 +240,20 @@ def main() -> int:
         if hit:
             human.append({"category": cat, "why": hit})
 
+    governance = cfg.get("governance") or {}
+    risk, reasons = None, []
+    if governance.get("enabled"):
+        changed = governance_changes(diff, kw_excl)
+        critical = rule_hits(always, labels, paths, changed)
+        high = rule_hits(governance.get("high", {}), labels, paths, changed)
+        medium = rule_hits(governance.get("medium", {}), labels, paths, changed)
+        # Size increases specialist scrutiny; it is not a human risk category.
+        if cap > 0 and size > cap:
+            high.append({"category": "size", "why": f"{size} changed lines > {cap}"})
+        human = critical
+        reasons = critical or high or medium
+        risk = "CRITICAL" if critical else "HIGH" if high else "MEDIUM" if medium else "LOW"
+
     run, needs = [], []
     if mig_files:
         allowed = mig.get("allowed_envs")
@@ -193,7 +278,8 @@ def main() -> int:
             needs.append(m.group(1).strip("`"))
 
     print(json.dumps({"human": human, "migrations": mig_files, "run": run,
-                      "needs_you": needs, "done": False}))
+                      "needs_you": needs, "done": False,
+                      "risk": risk, "risk_reasons": reasons}))
     return 0
 
 

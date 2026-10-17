@@ -31,12 +31,47 @@
 # (no subshell, no `exec` of a native PE), so `$!` names the worker itself rather than a bash stub.
 
 set -euo pipefail
+
+# Self-sufficient PATH. The runner is launched by autostart and by the watchdog (both export
+# this), but also by hand — and a bare `bash super-board-run.sh <slug>` inherits a PATH without
+# gh/node/claude, so the first read "could not start" and the board halted (2026-10-15). Set it
+# here so every launch method works. Prepending is idempotent; the guard sources this file too.
+export PATH="$HOME/.local/bin:$HOME/.local/node/bin:$HOME/.opencode/bin:$HOME/.dotnet:$PATH"
+
 SB_GITHUB_READ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/super-board-github-read.py"
-gh_checkpoint() { python3 "$SB_GITHUB_READ" --check || exit $?; }
+SB_GLOBAL_HALT_FILE="${SB_GITHUB_HALT_FILE:-$(pwd)/.claude/super-board/github-halt.json}"
+export SB_GITHUB_GLOBAL_HALT_FILE="$SB_GLOBAL_HALT_FILE"
+gh_checkpoint() { SB_GITHUB_HALT_FILE="$SB_GLOBAL_HALT_FILE" python3 "$SB_GITHUB_READ" --check || exit $?; }
+card_halt_path() { printf '%s/card-halts/%s.json' "$(dirname "$SB_GLOBAL_HALT_FILE")" "$1"; }
+card_issue_is_open() {
+  SB_GITHUB_HALT_FILE="$(card_halt_path "$1")" issue_is_open "$1"
+}
+block_card_read() {
+  local issue="$1" item_id="${2:-}"
+  [ -n "$item_id" ] || item_id=$(echo "$PROJECT_ITEMS_JSON" | jq -r --argjson n "$issue" '.items[] | select(.content.number == $n) | .id' | head -1)
+  # Reconciliation reads use the global scope, never the failed card sentinel.
+  if [ -n "$item_id" ] && set_card_status "$item_id" Blocked; then
+    [ -z "$BOT_LOGIN" ] || gh_write_once issue edit "$issue" --remove-assignee "$BOT_LOGIN" >/dev/null
+    gh_write_once issue comment "$issue" --body "[orchestrator] [blocker] 🛑 required GitHub read failed
+Did: isolated the failure to this card
+✅ Done: moved to Blocked; released inflight lock; preserved worktree and read evidence
+❌ Not done: required evidence unavailable
+blocked-by: reconcile card read evidence in $(card_halt_path "$issue")" >/dev/null
+    PROJECT_ITEMS_JSON=$(echo "$PROJECT_ITEMS_JSON" | jq --argjson n "$issue" '(.items[] | select(.content.number == $n) | .status) = "Blocked"')
+    rm -f "$INFLIGHT_DIR/$issue"
+    log "blocked #${issue}: required GitHub read failed; other cards continue"
+  else
+    log "⚠ could not move #${issue} to Blocked; preserving lock and evidence"
+  fi
+}
+
 gh_write_once() {
   gh_checkpoint
   gh "$@" || {
-    python3 "$SB_GITHUB_READ" --halt "GitHub $1 $2 response failed; reconcile the write before restarting" >&2 || true
+    # Record the actual command in the halt so the failed write can be reconciled. A
+    # mutation halt with no command is unreconcilable: on 2026-10-14 an `issue edit`
+    # halted the board and the write it was meant to perform could not be identified.
+    SB_GITHUB_HALT_FILE="$SB_GLOBAL_HALT_FILE" python3 "$SB_GITHUB_READ" --halt "GitHub 'gh $(printf '%s ' "$@")' failed; reconcile the write before restarting" >&2 || true
     exit 79
   }
 }
@@ -81,11 +116,26 @@ REBUILD_CAP=$(jq -r '.rebuild_cap // 2' "$CONFIG_PATH")
 BLOCK_ALERT_PCT=$(jq -r '.block_rate_alert_pct // 30' "$CONFIG_PATH")
 TICK_SECONDS=$(jq -r '.tick_seconds // 120' "$CONFIG_PATH")
 MAX_WORKERS=$(jq -r '.max_workers // 3' "$CONFIG_PATH")
+BUILD_SLOTS=$(jq -r '.build_slots // 1' "$CONFIG_PATH"); [ "$BUILD_SLOTS" -ge 1 ] 2>/dev/null || BUILD_SLOTS=1
 BOT_LOGIN=$(jq -r '.notifications.bot_identity // .bot_identity // ""' "$CONFIG_PATH")
 WORKER_BACKEND=$(jq -r '.worker_backend // "workflow"' "$CONFIG_PATH")
 # Runaway controls (issue #8). NO_PROGRESS_CYCLES counts dispatch cycles with no
 # card reaching Done, regardless of lane occupancy. MAX_DISPATCHES=0 disables the ceiling.
 NO_PROGRESS_CYCLES=$(jq -r '.no_progress_cycles // 6' "$CONFIG_PATH")
+GROOM_ENABLED=$(jq -r '.groom.enabled // true' "$CONFIG_PATH")
+GROOM_BACKEND=$(jq -r '.groom.backend // "claude"' "$CONFIG_PATH")
+# Derate the intake lane (groom.ready_floor, default 1): only groom while Ready holds
+# at or below this many stories, so a full groom agent does not run every tick — a
+# needless token drain that starves review/build of the same quota.
+GROOM_READY_FLOOR=$(jq -r '.groom.ready_floor // 1' "$CONFIG_PATH")
+# Skip re-grooming the same backlog. Only groom when the Backlog signature changes
+# (new stories / a new epic) or the cooldown elapses — so a posted scope decision is
+# still picked up, but an identical no-op groom agent no longer runs every tick.
+GROOM_COOLDOWN=$(jq -r '.groom.cooldown_seconds // 1800' "$CONFIG_PATH")
+GROOM_STATE=".claude/super-board/groom-state.json"
+GROOM_SIG=""
+LANE_BACKEND=$(jq -r '.lane_backend // "claude"' "$CONFIG_PATH")
+PROGRESS_SECONDS=$(jq -r '.progress_seconds // 120' "$CONFIG_PATH")
 MAX_DISPATCHES=$(jq -r '.max_dispatches // 0' "$CONFIG_PATH")
 
 # Workflow is the default backend (v1.6.0). This legacy dispatcher only runs
@@ -96,8 +146,6 @@ if [ "$WORKER_BACKEND" != "claude-p" ]; then
   echo "    To use this legacy dispatcher, set \"worker_backend\": \"claude-p\" in the config." >&2
   exit 78
 fi
-
-python3 "$(dirname "$SB_GITHUB_READ")/super-board-verification-ready.py" --config "$CONFIG_PATH"
 
 RUN_DATE=$(date +%Y-%m-%d)
 RUN_MANIFEST="docs/super-board/runs/${RUN_DATE}-${CONFIG_SLUG}.md"
@@ -113,6 +161,9 @@ fi  # end non-lib-only setup
 : "${WORKER_LOG_DIR:=/dev/null}"
 : "${INFLIGHT_DIR:=/dev/null}"
 : "${PROJECT_OWNER:=}" ; : "${PROJECT_NUMBER:=0}" ; : "${BOT_LOGIN:=}"
+# Board checkout root: Review reads policy (skill, run.md, gate) from HERE, never the card
+# worktree, so a policy change reaches in-flight cards (2026-10-15 review-loop lesson).
+: "${BOARD_ROOT:=$(pwd)}"
 
 # ───────────────────────────── helpers ─────────────────────────────
 log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$RUN_MANIFEST"; }
@@ -214,8 +265,11 @@ top_card_in_column() {
     [ -n "$issue" ] || continue
     issue_locked "$issue" && continue
     local issue_rc=0
-    issue_is_open "$issue" || issue_rc=$?
-    [ "$issue_rc" -le 1 ] || exit "$issue_rc"
+    card_issue_is_open "$issue" || issue_rc=$?
+    if [ "$issue_rc" -gt 1 ]; then
+      block_card_read "$issue" "${item_id:-}"
+      continue
+    fi
     if [ "$issue_rc" -ne 0 ]; then
       log "reconciled closed #${issue} -> Done (was '${col}') — dispatching 0 workers for it"
       set_card_status "$item_id" "Done" || { gh_checkpoint; log "  ↳ reconcile of #${issue} could not be written to the board"; return 1; }
@@ -240,7 +294,7 @@ read_lock() {
   # Reads $INFLIGHT_DIR/$1 (bash-assignment format) into PID/LANE/STARTED.
   # Sets empty strings if the file is missing or legacy single-PID format.
   local lock="$INFLIGHT_DIR/$1"
-  PID=""; LANE=""; STARTED=""
+  PID=""; LANE=""; STARTED=""; PROVIDER="claude"
   [ -f "$lock" ] || return 1
   if grep -q '^PID=' "$lock" 2>/dev/null; then
     # shellcheck disable=SC1090
@@ -304,42 +358,98 @@ try_claim_assignee() {
   return 0
 }
 
+start_progress_heartbeat() {
+  # $1 lane  $2 issue  $3 worker pid  $4 worker log
+  # Writes a progress line every PROGRESS_SECONDS (default 120s) with elapsed time and the
+  # worker's latest output line, so lanes report progress every 2 minutes instead of only
+  # at completion. Self-terminates when the worker exits.
+  #
+  # Runs as its OWN bash process with a distinct argv[0] ("super-board-heartbeat"). A
+  # `( ... ) &` subshell would inherit this runner's argv, and /proc/<pid>/cmdline would
+  # then read `bash .claude/bin/super-board-run.sh fieldops` — so `pgrep -f
+  # "super-board-run.sh fieldops"` counted the heartbeat as a second runner (watchdog
+  # dedupe killed it; restart/orphan logic could misjudge liveness).
+  local lane="$1" issue="$2" wpid="$3" wlog="$4"
+  local prog="${WORKER_LOG_DIR}/progress-${lane}-${issue}.log"
+  SB_HB_WPID="$wpid" SB_HB_LOG="$prog" SB_HB_WLOG="$wlog" \
+  SB_HB_LANE="$lane" SB_HB_ISSUE="$issue" SB_HB_SECONDS="${PROGRESS_SECONDS:-120}" \
+    nohup bash -c '
+      start=$(date +%s)
+      while kill -0 "$SB_HB_WPID" 2>/dev/null; do
+        sleep "$SB_HB_SECONDS"
+        kill -0 "$SB_HB_WPID" 2>/dev/null || break
+        now=$(date +%s)
+        last=$(grep -v "^[[:space:]]*$" "$SB_HB_WLOG" 2>/dev/null | tail -n 1 | tr -d "\r" | cut -c1-240)
+        printf "[%s] lane=%s issue=#%s alive %ss — %s\n" "$(date -u +%FT%TZ)" "$SB_HB_LANE" "$SB_HB_ISSUE" "$((now-start))" "$last" >> "$SB_HB_LOG"
+      done
+    ' super-board-heartbeat >/dev/null 2>&1 &
+}
+
+review_worktree() {
+  # Hand the Review lane a clean per-issue worktree so the reviewer's working-tree scope
+  # check runs on a pristine tree instead of the host checkout, which accumulates untracked
+  # runtime state (halts, pauses, run docs). Prints the worktree path on success; non-zero
+  # (caller falls back to the host cwd) when the card's branch is unknown or the worktree
+  # cannot be created.
+  local issue="$1" wt branch
+  wt=".claude/worktrees/issue-${issue}-review"
+  if [ -d "$wt" ]; then printf '%s\n' "$wt"; return 0; fi
+  branch=$(git for-each-ref --format='%(refname:short)' \
+    "refs/heads/issue-${issue}-*" "refs/remotes/origin/issue-${issue}-*" 2>/dev/null | head -n1 || true)
+  [ -n "$branch" ] || return 1
+  case "$branch" in
+    origin/*) branch="${branch#origin/}"; git worktree add --track -b "$branch" "$wt" "origin/$branch" >/dev/null 2>&1 || return 1 ;;
+    *)        git worktree add "$wt" "$branch" >/dev/null 2>&1 || return 1 ;;
+  esac
+  [ -d "$wt" ] || return 1
+  printf '%s\n' "$wt"
+}
+
 dispatch_lane() {
   # $1 = lane (build|qa|review); $2 = issue number
-  local lane="$1" issue="$2" prompt pid
+  local lane="$1" issue="$2" prompt pid provider card_json review_wt=""
+  provider=$(lane_provider "$lane") || {
+    log "no provider available for lane=${lane} issue=#${issue}"
+    # A frozen pipeline must not be invisible: surface it once per 30 min in a
+    # small persistent file the orchestrator/status can see, not just the run log.
+    att=".claude/super-board/needs-attention.log"
+    if [ ! -f "$att" ] || [ $(( $(date +%s) - $(stat -c %Y "$att" 2>/dev/null || echo 0) )) -ge 1800 ]; then
+      printf '%s no provider available for lane=%s issue=#%s (check .claude/super-board/provider-pauses/)\n' \
+        "$(date -u +%FT%TZ)" "$lane" "$issue" >> "$att"
+    fi
+    return 1
+  }
   if issue_locked "$issue"; then
     log "skip dispatch lane=${lane} issue=#${issue} — already locked"
-    return 0
+    return 1
   fi
   # Authoritative closed-issue gate (issue #10). top_card_in_column also filters and
   # reconciles, but every dispatch path funnels through here — one guard, one place.
   gh_checkpoint
   local issue_rc=0
-  issue_is_open "$issue" || issue_rc=$?
-  [ "$issue_rc" -le 1 ] || exit "$issue_rc"
+  card_issue_is_open "$issue" || issue_rc=$?
+  if [ "$issue_rc" -gt 1 ]; then
+    block_card_read "$issue"
+    return 1
+  fi
   if [ "$issue_rc" -ne 0 ]; then
     log "skip dispatch lane=${lane} issue=#${issue} — issue is CLOSED"
-    return 0
-  fi
-  local card skills_rc=0 skills_report
-  card=$(echo "$PROJECT_ITEMS_JSON" | jq -c --argjson n "$issue" --arg lane "$lane" '
-    [.items[] | select(.content.number == $n) | {number:$n, status:(.status // "Ready"), labels:(.labels // .content.labels // []), lane:$lane}]')
-  [ "$(printf '%s' "$card" | jq length)" -eq 1 ] || { log "skills-readiness: selected issue #${issue} missing from board cache"; exit 64; }
-  skills_report=$(printf '%s' "$card" | python3 "$(dirname "$SB_GITHUB_READ")/super-board-skills-ready.py"     --root "$PWD" --host claude --cards - --hydrate) || skills_rc=$?
-  if [ "$skills_rc" -ne 0 ]; then
-    log "skills-readiness: halt before claim lane=${lane} issue=#${issue}; ${skills_report}"
-    exit "$skills_rc"
+    return 1
   fi
   if ! try_claim_assignee "$issue"; then
-    return 0
+    return 1
   fi
   case "$lane" in
-    build)  prompt="Run super-build on issue #${issue} for super-board run. Read .claude/skills/super-board/references/run.md → Builder lifecycle. Config: ${CONFIG_PATH}." ;;
+    build|build2) prompt="Run super-build on issue #${issue} for super-board run. Read .claude/skills/super-board/references/run.md → Builder lifecycle. Config: ${CONFIG_PATH}." ;;
     qa)     prompt="Run super-qa on issue #${issue} for super-board run. Read .claude/skills/super-board/references/run.md → Tester lifecycle. Config: ${CONFIG_PATH}." ;;
-    review) prompt="Run super-review on issue #${issue} for super-board run. Read .claude/skills/super-board/references/run.md → Reviewer lifecycle. Config: ${CONFIG_PATH}." ;;
+    review) prompt="Run super-review on issue #${issue} for super-board run. This worktree is the CARD BRANCH — read POLICY from the board checkout instead, so a policy change reaches this card: ${BOARD_ROOT}/.claude/skills/super-review/SKILL.md, ${BOARD_ROOT}/.claude/skills/super-board/references/run.md → Reviewer lifecycle, and ${BOARD_ROOT}/.claude/skills/super-board/references/security-gate.md. Run the merge gate as ${BOARD_ROOT}/.claude/bin/super-board-merge-gate.sh --config ${BOARD_ROOT}/.claude/super-board/configs/${CONFIG_SLUG}.json. Review the diff in this worktree; do not read policy from it." ;;
     *) log "unknown lane: $lane"; return 1 ;;
   esac
-  prompt="First operation: run .claude/bin/super-board-skills-ready.py --root '$PWD' --host claude --cards - --lane '$lane' --hydrate with $card as stdin. Halt on exit 10 before worktree creation or lifecycle writes; preserve claims and approval evidence. Load resolved paths and only declared fallbacks; recheck conditionals with --require before activation. $prompt"
+  # Review runs in its own worktree, never the host checkout (see review_worktree).
+  if [ "$lane" = "review" ]; then
+    review_wt=$(review_worktree "$issue" || true)
+    [ -n "$review_wt" ] && log "review #${issue}: isolated worktree ${review_wt}"
+  fi
   # Worker output goes to a per-worker log, not /dev/null (issue #13). Redirect at the
   # `claude` invocation itself — no wrapping subshell, no `exec` — so the wire to the
   # file survives and `$!` names the worker process rather than a bash stub.
@@ -349,27 +459,98 @@ dispatch_lane() {
     printf 'prompt: %s\n\n' "$prompt"
   } >> "$worker_log"
   gh_checkpoint
-  nohup claude -p "$prompt" >> "$worker_log" 2>&1 &
+  # Review stays on Claude (board rule); build/qa fall back claude → codex → deepseek
+  # → openrouter (usage_order + usage_fallback) so the board keeps moving when the paid
+  # plans are exhausted. Fallback hosts never own Review or merge.
+  # Review is launched inside its isolated worktree via `env -C <dir>` (which execs straight
+  # through, so `$!` still names the worker, not a bash stub). Every other lane keeps the host cwd.
+  case "$provider" in
+    codex)
+      if [ -n "$review_wt" ]; then
+        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" nohup env -C "$review_wt" codex exec -s danger-full-access "$prompt" >> "$worker_log" 2>&1 &
+      else
+        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" nohup codex exec -s danger-full-access "$prompt" >> "$worker_log" 2>&1 &
+      fi
+      ;;
+    deepseek|openrouter)
+      card_json=$(card_json_for "$issue")
+      SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" nohup bash ".claude/bin/super-board-${provider}-lane.sh" --config "$CONFIG_PATH" --lane "$lane" --card "$card_json" >> "$worker_log" 2>&1 &
+      ;;
+    *)
+      if [ -n "$review_wt" ]; then
+        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" nohup env -C "$review_wt" claude -p "$prompt" --dangerously-skip-permissions >> "$worker_log" 2>&1 &
+      else
+        SB_GITHUB_HALT_FILE="$(card_halt_path "$issue")" nohup claude -p "$prompt" --dangerously-skip-permissions >> "$worker_log" 2>&1 &
+      fi
+      ;;
+  esac
   pid=$!
+  start_progress_heartbeat "$lane" "$issue" "$pid" "$worker_log"
   DISPATCH_COUNT=$((DISPATCH_COUNT + 1))
   DISPATCH_LOG="${DISPATCH_LOG}${issue}
 "
   # v1.3.0+ lock format: bash-assignment style so `super-board stop` can source it
   # to recover lane + dispatch time. issue_locked()/reap_finished_locks() still work
   # because PID= is the first line.
-  printf 'PID=%s\nLANE=%s\nSTARTED=%s\n' "$pid" "$lane" "$(date -u +%FT%TZ)" > "$INFLIGHT_DIR/$issue"
+  printf 'PID=%s\nLANE=%s\nSTARTED=%s\nPROVIDER=%s\n' "$pid" "$lane" "$(date -u +%FT%TZ)" "$provider" > "$INFLIGHT_DIR/$issue"
   case "$lane" in
     build) BUILD_PID="$pid"; BUILD_ISSUE="$issue" ;;
+    build2) BUILD2_PID="$pid"; BUILD2_ISSUE="$issue" ;;
     qa) QA_PID="$pid"; QA_ISSUE="$issue" ;;
     review) REVIEW_PID="$pid"; REVIEW_ISSUE="$issue" ;;
   esac
   log "dispatch lane=${lane} issue=#${issue} pid=${pid} claim=${BOT_LOGIN:-local-only}"
 }
 
+dispatch_groom() {
+  # Backlog->Ready grooming lane: no card, no assignee claim, no per-issue lock.
+  # Falls back claude → codex → deepseek → openrouter like build/qa, so the backlog
+  # keeps getting refined (and Ready stays stocked) while the paid plans are exhausted.
+  local prompt pid worker_log provider
+  provider=$(lane_provider groom) || return 0
+  prompt="Run super-groom for super-board run. Read .claude/skills/super-groom/SKILL.md (and .claude/skills/super-board/references/run.md). Config: ${CONFIG_PATH}."
+  worker_log="${WORKER_LOG_DIR}/worker-groom.log"
+  {
+    printf '=== dispatch lane=groom backend=%s at %s ===\n' "$provider" "$(date -u +%FT%TZ)"
+    printf 'prompt: %s\n\n' "$prompt"
+  } >> "$worker_log"
+  gh_checkpoint
+  case "$provider" in
+    codex)
+      nohup codex exec -s danger-full-access "$prompt" >> "$worker_log" 2>&1 & ;;
+    deepseek|openrouter)
+      nohup bash ".claude/bin/super-board-${provider}-lane.sh" --config "$CONFIG_PATH" --lane groom >> "$worker_log" 2>&1 & ;;
+    *)
+      nohup claude -p "$prompt" --dangerously-skip-permissions >> "$worker_log" 2>&1 & ;;
+  esac
+  pid=$!
+  GROOM_PID="$pid"; GROOM_PROVIDER="$provider"
+  printf '{"sig":"%s","at":%s}\n' "${GROOM_SIG:-}" "$(date +%s)" > "$GROOM_STATE" 2>/dev/null || true
+  start_progress_heartbeat groom - "$pid" "$worker_log"
+  log "dispatch lane=groom backend=${provider} pid=${pid}"
+}
+
+reap_finished_groom() {
+  [ -n "${GROOM_PID:-}" ] || return 0
+  kill -0 "$GROOM_PID" 2>/dev/null && return 0
+  local provider="${GROOM_PROVIDER:-${GROOM_BACKEND:-claude}}"
+  if provider_limit_log "$provider" "${WORKER_LOG_DIR}/worker-groom.log"; then
+    pause_provider "$provider" "vendor limit in groom worker log"
+  fi
+  GROOM_PID=""; GROOM_PROVIDER=""
+}
+
 issue_status() {
   # Lookup issue #$1 in the cached project items; emit its current column name (or empty).
   echo "$PROJECT_ITEMS_JSON" | jq -r --arg n "$1" '
     .items[] | select(.content.number == ($n | tonumber)) | .status' | head -1
+}
+
+card_json_for() {
+  # $1 issue -> the card JSON the fallback lane runners expect: {"number":N,"status":col,"title":…}
+  local title
+  title=$(echo "$PROJECT_ITEMS_JSON" | jq -r --argjson n "$1" '.items[]|select(.content.number==$n)|.content.title' 2>/dev/null | head -1)
+  jq -cn --argjson n "$1" --arg st "$(issue_status "$1")" --arg t "${title:-}" '{number:$n,status:$st,title:$t}'
 }
 
 check_lane_zombie() {
@@ -380,6 +561,7 @@ check_lane_zombie() {
   local lane="$1" expected="$2" pid="" issue=""
   case "$lane" in
     build)  pid="$BUILD_PID";  issue="$BUILD_ISSUE" ;;
+    build2) pid="$BUILD2_PID"; issue="$BUILD2_ISSUE" ;;
     qa)     pid="$QA_PID";     issue="$QA_ISSUE" ;;
     review) pid="$REVIEW_PID"; issue="$REVIEW_ISSUE" ;;
     *) return 1 ;;
@@ -405,6 +587,7 @@ check_lane_zombie() {
     rm -f "$INFLIGHT_DIR/$issue"
     case "$lane" in
       build)  BUILD_PID="";  BUILD_ISSUE="" ;;
+      build2) BUILD2_PID=""; BUILD2_ISSUE="" ;;
       qa)     QA_PID="";     QA_ISSUE="" ;;
       review) REVIEW_PID=""; REVIEW_ISSUE="" ;;
     esac
@@ -413,6 +596,7 @@ check_lane_zombie() {
 
 sweep_lane_zombies() {
   check_lane_zombie build  "Ready Building"
+  check_lane_zombie build2 "Ready Building"
   check_lane_zombie qa     "QA"
   check_lane_zombie review "Review"
 }
@@ -476,6 +660,15 @@ reap_finished_locks() {
     case "$issue" in *[!0-9]*|'') continue ;; esac
     read_lock "$issue"
     if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+      if [ -f "$(card_halt_path "$issue")" ]; then
+        block_card_read "$issue"
+        REAP_COUNT=$((REAP_COUNT + 1))
+        continue
+      fi
+      local worker_log="${WORKER_LOG_DIR}/worker-${LANE}-${issue}.log"
+      if provider_limit_log "$PROVIDER" "$worker_log"; then
+        pause_provider "$PROVIDER" "vendor limit in worker log"
+      fi
       gh_checkpoint
       if [ -n "$BOT_LOGIN" ]; then
         gh_checkpoint
@@ -524,46 +717,196 @@ cleanup_stale_worktrees() {
   return 0
 }
 
+declare -A STRANDED_TICKS=()
 reclaim_stranded_building() {
-  # Run start only (no worker of ours is alive yet — the orphan guard proved it).
-  # A card in Building with no live in-flight lock and no assignee but ours was
-  # stranded by a run that stopped mid-build. No lane selects from Building, so
-  # left alone it sits there forever and the run can never reach "all columns
-  # empty". Move it back to Ready and say so; the issue branch is kept, so the
-  # next Builder continues on it instead of starting over.
-  local issue item_id branch wt wt_branch
+  local issue item_id count target state_dir
+  state_dir="$(dirname "$SB_GLOBAL_HALT_FILE")/recovered"
   while IFS=$'\t' read -r issue item_id; do
     [ -n "$issue" ] || continue
-    issue_locked "$issue" && continue
-    branch=$(git ls-remote --heads origin "issue-${issue}-*" 2>/dev/null | head -1 | sed 's#.*refs/heads/##')
-    wt=".claude/worktrees/issue-${issue}-build"
-    if [ -d "$wt" ]; then
-      wt_branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-      if [ -z "$wt_branch" ] || ! git worktree remove "$wt" 2>/dev/null; then
-        log "⚠ stranded #${issue}: kept $wt and Building status — inspect its detached commits/edits/lock before resuming"
-        continue
-      fi
+    if issue_locked "$issue"; then STRANDED_TICKS[$issue]=0; continue; fi
+    count=$(( ${STRANDED_TICKS[$issue]:-0} + 1 ))
+    STRANDED_TICKS[$issue]=$count
+    [ "$count" -ge 2 ] || continue
+    target=Ready
+    [ ! -f "$state_dir/$issue" ] || target=Blocked
+    if set_card_status "$item_id" "$target"; then
+      mkdir -p "$state_dir"; touch "$state_dir/$issue"
+      STRANDED_TICKS[$issue]=0
+      PROJECT_ITEMS_JSON=$(echo "$PROJECT_ITEMS_JSON" | jq --argjson n "$issue" --arg status "$target" '(.items[] | select(.content.number == $n) | .status) = $status')
+      [ -z "$BOT_LOGIN" ] || gh_write_once issue edit "$issue" --remove-assignee "$BOT_LOGIN" >/dev/null
+      gh_write_once issue comment "$issue" --body "[orchestrator] [report] stranded Building card recovered
+Did: observed two idle ticks without a live worker
+✅ Done: moved to $target; preserved branches and worktree edits
+blocked-by: ${target/Ready/none}" >/dev/null
+      log "recovered stranded #${issue} to ${target}; worktree preserved"
     fi
-    if ! set_card_status "$item_id" "Ready"; then
-      gh_checkpoint
-      log "⚠ stranded #${issue} in Building — could not move it to Ready; drag it by hand"
-      continue
-    fi
-    [ -n "$BOT_LOGIN" ] && gh_write_once issue edit "$issue" --remove-assignee "$BOT_LOGIN" >/dev/null 2>&1 || true
-    # Comment format: writing-standard.md § 4.
-    gh_checkpoint
-    gh_write_once issue comment "$issue" --body "[orchestrator] [report] ↩️ back to Ready · stranded in Building
-Did: found no live worker; the last run stopped mid-build
-✅ Done: card moved to Ready · branch ${branch:-none found}${branch:+ kept}
-Next: builder (next tick${branch:+, continues on the branch})" >/dev/null 2>&1 || true
-    log "↩ stranded #${issue}: Building → Ready (branch ${branch:-none})"
   done <<EOF
-$(echo "$PROJECT_ITEMS_JSON" | jq -r --arg bot "$BOT_LOGIN" '
-    .items[]
-    | select(.status == "Building" and .content.type == "Issue")
-    | select(((.content.assignees // []) - [$bot]) | length == 0)
-    | [(.content.number | tostring), (.id // "")] | @tsv')
+$(echo "$PROJECT_ITEMS_JSON" | jq -r --arg bot "$BOT_LOGIN" '.items[] | select(.status == "Building" and .content.type == "Issue") | select(((.content.assignees // []) - [$bot]) | length == 0) | [(.content.number | tostring), .id] | @tsv')
 EOF
+  # A tick outside Building breaks the consecutive-idle sequence.
+  for issue in "${!STRANDED_TICKS[@]}"; do
+    [ "$(issue_status "$issue")" = Building ] || unset 'STRANDED_TICKS[$issue]'
+  done
+}
+
+sweep_blocked_by() {
+  # Free a card parked with `blocked-by: <n>` once EVERY referenced issue is closed.
+  # The workflow backend sweeps this at wave start; the claude-p runner must too, or a
+  # merged blocker strands the next card indefinitely (2026-10-15: #229 sat Blocked behind
+  # a merged #228 and the board went idle). One `gh issue view` per Blocked card, per sweep.
+  local issue item_id last blocked num st rc all
+  while IFS=$'\t' read -r issue item_id; do
+    [ -n "$issue" ] || continue
+    if issue_locked "$issue"; then continue; fi
+    last=$(gh issue view "$issue" --json comments -q '.comments[-1].body // ""' 2>/dev/null) || continue
+    blocked=$(printf '%s\n' "$last" | sed -n 's/^blocked-by:[[:space:]]*//p' | tail -1)
+    [ -n "$blocked" ] || continue
+    case "$blocked" in -*|'') continue ;; esac     # `-`/empty = blocked for a reason, not sequencing
+    all=1
+    for num in $(printf '%s' "$blocked" | grep -oE '[0-9]+'); do
+      st=$(echo "$PROJECT_ITEMS_JSON" | jq -r --argjson n "$num" '.items[]|select(.content.number==$n)|.status' 2>/dev/null | head -1)
+      if [ "$st" = "Done" ]; then continue; fi      # blocker already landed on the board
+      if issue_is_open "$num"; then rc=0; else rc=$?; fi
+      case "$rc" in 1) ;; 0) all=0 ;; *) return 1 ;; esac   # 1 = CLOSED → resolved
+    done
+    [ "$all" -eq 1 ] || continue
+    if set_card_status "$item_id" Ready; then
+      PROJECT_ITEMS_JSON=$(echo "$PROJECT_ITEMS_JSON" | jq --argjson n "$issue" '(.items[]|select(.content.number==$n)|.status)="Ready"')
+      gh_write_once issue comment "$issue" --body "[orchestrator] [report] unblocked
+Did: every blocked-by issue is closed
+✅ Done: moved Blocked → Ready to build
+blocked-by: none" >/dev/null
+      log "unblocked #${issue}: blockers closed → Ready"
+    fi
+  done <<EOF
+$(echo "$PROJECT_ITEMS_JSON" | jq -r '.items[] | select(.status == "Blocked" and .content.type == "Issue") | [(.content.number|tostring), .id] | @tsv')
+EOF
+}
+
+provider_limit_log() {
+  local provider="$1" file="$2" pattern
+  [ -f "$file" ] || return 1
+  case "$provider" in claude) pattern='session limit' ;; codex) pattern='usage limit|chatgpt\.com' ;; *) return 1 ;; esac
+  tail -n 5 "$file" | grep -qiE "$pattern"
+}
+pause_provider() {
+  local pause_dir source="${3:-vendor}" existing_source
+  pause_dir="${SB_PROVIDER_PAUSE_DIR:-$(dirname "$SB_GLOBAL_HALT_FILE")/provider-pauses}"
+  mkdir -p "$pause_dir"
+  existing_source=$(jq -r '.source // "vendor"' "$pause_dir/$1" 2>/dev/null || echo vendor)
+  # Keep the first terminal limit's time; repeated log scans must not move it.
+  if [ -f "$pause_dir/$1" ] && [ "$existing_source" = vendor ]; then return 0; fi
+  jq -n --arg reason "$2" --arg source "$source" '{at:(now | floor),source:$source,reason:$reason}' > "$pause_dir/$1"
+  log "paused $1 lanes: $2 (read-only; the runner owns backend selection)"
+}
+provider_usage_check() {
+  # Provider-appropriate usage/balance check. Same JSON contract + exit codes as
+  # super-board-usage.sh (0 ok, 10 pause, 3 unknown, 64 usage error).
+  local bin; bin="$(dirname "$SB_GITHUB_READ")"
+  case "$1" in
+    claude|codex) bash "$bin/super-board-usage.sh" check --provider "$1" --config "$CONFIG_PATH" ;;
+    deepseek)     bash "$bin/super-board-deepseek-balance.sh" check --config "$CONFIG_PATH" ;;
+    openrouter)   bash "$bin/super-board-openrouter-balance.sh" check --config "$CONFIG_PATH" ;;
+    *) echo '{"state":"unknown","reason":"unknown provider"}'; return 3 ;;
+  esac
+}
+usage_providers() {
+  # Ordered providers for non-review lanes: primary order, then fallbacks. The
+  # fallback list is what the deepseek/openrouter lane runners require to accept a call.
+  # A missing/unreadable config yields empty jq output (exit 0), so default explicitly.
+  local out
+  out=$(jq -r '((.usage_order // ["claude","codex"]) + (.usage_fallback // [])) | unique_by(.) | .[]' "$CONFIG_PATH" 2>/dev/null) || true
+  [ -n "$out" ] || out=$'claude\ncodex'
+  printf '%s\n' "$out"
+}
+groom_providers() {
+  # Providers allowed to groom. Kept separate from build/qa so grooming never spends
+  # Claude's or Codex's budget — those are reserved for build/qa (config groom.providers).
+  local out
+  out=$(jq -r '(.groom.providers // ["deepseek","openrouter"]) | .[]' "$CONFIG_PATH" 2>/dev/null) || true
+  [ -n "$out" ] || out=$'deepseek\nopenrouter'
+  printf '%s\n' "$out"
+}
+review_providers() {
+  # Providers allowed to review. Claude is preferred (its purpose-built /security-review);
+  # Codex is the allowed fallback (config review.providers), where S1 runs as a Codex
+  # security pass. Fallback legs (deepseek/openrouter) never review.
+  local out
+  out=$(jq -r '(.review.providers // ["claude","codex"]) | .[]' "$CONFIG_PATH" 2>/dev/null) || true
+  [ -n "$out" ] || out=$'claude\ncodex'
+  printf '%s\n' "$out"
+}
+lane_provider() {
+  # First provider allowed for this lane. provider_dispatch_allowed logs to stdout;
+  # route that to stderr so the captures below yield only the provider name.
+  #   review   → review.providers (claude → codex).
+  #   groom    → groom.providers (deepseek → openrouter).
+  #   build/qa → usage_order + usage_fallback (claude → codex → deepseek → openrouter).
+  local p
+  case "$1" in
+    review)
+      for p in $(review_providers); do provider_dispatch_allowed "$p" >&2 && { echo "$p"; return 0; }; done
+      return 1 ;;
+    groom)
+      for p in $(groom_providers); do provider_dispatch_allowed "$p" >&2 && { echo "$p"; return 0; }; done
+      return 1 ;;
+  esac
+  for p in $(usage_providers); do
+    provider_dispatch_allowed "$p" >&2 && { echo "$p"; return 0; }
+  done
+  return 1
+}
+provider_dispatch_allowed() {
+  local provider="$1" result rc=0 state pause_dir pause_at recorded_at source
+  pause_dir="${SB_PROVIDER_PAUSE_DIR:-$(dirname "$SB_GLOBAL_HALT_FILE")/provider-pauses}"
+  # A vendor pause records a rate-limit window (~5h). Once that window has elapsed the pause
+  # is stale — clear it, since these providers have no usage snapshot to disconfirm it. A
+  # stale pause otherwise parks a fully-available provider until a manual reset (2026-10-14).
+  if [ -f "$pause_dir/$provider" ]; then
+    pause_at=$(jq -r '.at // 0' "$pause_dir/$provider" 2>/dev/null || echo 0)
+    local pause_age
+    pause_age=$(( $(date +%s) - ${pause_at:-0} ))
+    if [ "${pause_at:-0}" -gt 0 ] && [ "$pause_age" -ge "${SB_PAUSE_TTL:-1800}" ]; then
+      log "cleared stale $provider pause (age ${pause_age}s ≥ ${SB_PAUSE_TTL:-1800}s window)"
+      rm -f "$pause_dir/$provider"
+    fi
+  fi
+  result=$(provider_usage_check "$provider") || rc=$?
+  state=$(printf '%s' "$result" | jq -r '.state // "unknown"' 2>/dev/null || echo unknown)
+  if [ "$state" = pause ]; then pause_provider "$provider" "$(printf '%s' "$result" | jq -r .reason)" snapshot; return 1; fi
+  if [ "$state" = ok ] && [ -f "$pause_dir/$provider" ]; then
+    source=$(jq -r '.source // "vendor"' "$pause_dir/$provider" 2>/dev/null || echo vendor)
+    pause_at=$(jq -r '.at // 0' "$pause_dir/$provider" 2>/dev/null || echo 0)
+    recorded_at=$(printf '%s' "$result" | jq -r '.recorded_at // 0')
+    # A low snapshot predating a terminal failure cannot disprove exhaustion.
+    if [ "$source" = snapshot ] || [ "$recorded_at" -gt "$pause_at" ]; then
+      rm -f "$pause_dir/$provider"
+    fi
+  fi
+  if [ -f "$pause_dir/$provider" ]; then
+    log "lane paused: $provider ($(cat "$pause_dir/$provider"))"
+    # Claude-first, then Codex: when Claude is the active backend and is exhausted, switch to
+    # Codex in place so build/qa keep moving (no runner restart). Review stays Claude and waits.
+    if [ "$provider" = "claude" ] && [ "${LANE_BACKEND:-claude}" = "claude" ] && [ ! -f "$pause_dir/codex" ]; then
+      LANE_BACKEND="codex"
+      python3 - "$CONFIG_PATH" <<'PY'
+import json, sys, pathlib
+p = pathlib.Path(sys.argv[1])
+try:
+    d = json.loads(p.read_text())
+except (OSError, ValueError):
+    sys.exit(0)
+d['lane_backend'] = 'codex'; p.write_text(json.dumps(d, indent=2) + "\n")
+PY
+      log "backend switched to codex (Claude exhausted) — build/qa continue on Codex; review waits for Claude"
+      # Backend changes apply to the next dispatch. This caller still selected
+      # exhausted Claude (especially Review), so it must stop here.
+      return 1
+    fi
+    return 1
+  fi
+  [ "$state" != unknown ] || log "usage $provider unknown (no fresh plan snapshot); dispatch permitted"
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ]
 }
 
 # ───────────────────────── run counters (shared state) ─────────────────────────
@@ -578,12 +921,11 @@ if [ "${SB_LIB_ONLY:-0}" = "1" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
-# A readiness/read failure stops only workers launched by this dispatcher. Keep their
+# A read failure stops only workers launched by this dispatcher. Keep their
 # locks, worktrees, claims, and approval evidence for explicit recovery.
 halt_cleanup() {
-  local rc=$?
-  if [ "$rc" -eq 9 ] || [ "$rc" -eq 10 ] || ! python3 "$SB_GITHUB_READ" --check >/dev/null 2>&1; then
-    for pid in "${BUILD_PID:-}" "${QA_PID:-}" "${REVIEW_PID:-}"; do
+  if ! python3 "$SB_GITHUB_READ" --check >/dev/null 2>&1; then
+    for pid in "${BUILD_PID:-}" "${BUILD2_PID:-}" "${QA_PID:-}" "${REVIEW_PID:-}"; do
       [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
     done
   fi
@@ -640,11 +982,12 @@ PREV_DONE_SIG=$(done_signature)
 INITIAL_DONE_SIG="$PREV_DONE_SIG"
 NO_PROGRESS_CYCLE_COUNT=0
 BUILD_PID=""; BUILD_ISSUE=""
+BUILD2_PID=""; BUILD2_ISSUE=""
 QA_PID=""; QA_ISSUE=""
 REVIEW_PID=""; REVIEW_ISSUE=""
+GROOM_PID=""; GROOM_PROVIDER=""
 
 while true; do
-  python3 "$(dirname "$SB_GITHUB_READ")/super-board-verification-ready.py" --config "$CONFIG_PATH"
   gh_checkpoint
   # Workflow-backend mutual exclusion, re-checked every tick: the startup
   # check alone leaves a TOCTOU window where a workflow run starting at the
@@ -664,13 +1007,15 @@ while true; do
   sweep_lane_zombies
 
   # ── Free pre-check: count active lanes from local PIDs (no API calls).
-  BUILD_IDLE=1; QA_IDLE=1; REVIEW_IDLE=1
+  BUILD_IDLE=1; BUILD2_IDLE=1; QA_IDLE=1; REVIEW_IDLE=1
   lane_idle "$BUILD_PID" || BUILD_IDLE=0
+  lane_idle "$BUILD2_PID" || BUILD2_IDLE=0
   lane_idle "$QA_PID" || QA_IDLE=0
   lane_idle "$REVIEW_PID" || REVIEW_IDLE=0
 
   ACTIVE_WORKERS=0
   [ "$BUILD_IDLE" -eq 1 ] || ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
+  [ "$BUILD2_IDLE" -eq 1 ] || ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
   [ "$QA_IDLE" -eq 1 ] || ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
   [ "$REVIEW_IDLE" -eq 1 ] || ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
 
@@ -686,14 +1031,20 @@ while true; do
   gh_rate_guard
   fetch_project_items
 
+  reap_finished_locks   # every tick: a restart-stranded QA/Review card recovers without a manual unlock
+  reclaim_stranded_building
+  sweep_blocked_by   # free cards whose blocked-by issues have since closed
+
   # Re-sweep zombies against fresh cache; the previous sweep used stale data.
   sweep_lane_zombies
-  BUILD_IDLE=1; QA_IDLE=1; REVIEW_IDLE=1
+  BUILD_IDLE=1; BUILD2_IDLE=1; QA_IDLE=1; REVIEW_IDLE=1
   lane_idle "$BUILD_PID" || BUILD_IDLE=0
+  lane_idle "$BUILD2_PID" || BUILD2_IDLE=0
   lane_idle "$QA_PID" || QA_IDLE=0
   lane_idle "$REVIEW_PID" || REVIEW_IDLE=0
   ACTIVE_WORKERS=0
   [ "$BUILD_IDLE" -eq 1 ] || ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
+  [ "$BUILD2_IDLE" -eq 1 ] || ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
   [ "$QA_IDLE" -eq 1 ] || ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
   [ "$REVIEW_IDLE" -eq 1 ] || ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
 
@@ -703,12 +1054,36 @@ while true; do
   QA=$(column_count "QA")
   REVIEW=$(column_count "Review")
   BLOCKED=$(column_count "Blocked")
+  BACKLOG=$(column_count "Backlog")
 
-  log "tick — Ready=$READY Building=$BUILDING QA=$QA Review=$REVIEW Blocked=$BLOCKED lanes: b_idle=$BUILD_IDLE(#${BUILD_ISSUE:-_}) q_idle=$QA_IDLE(#${QA_ISSUE:-_}) r_idle=$REVIEW_IDLE(#${REVIEW_ISSUE:-_})"
+  GROOM_IDLE=1
+  reap_finished_groom
+  [ -z "${GROOM_PID:-}" ] || GROOM_IDLE=0
+
+  log "tick — Ready=$READY Building=$BUILDING QA=$QA Review=$REVIEW Blocked=$BLOCKED Backlog=$BACKLOG lanes: b_idle=$BUILD_IDLE(#${BUILD_ISSUE:-_}) b2_idle=$BUILD2_IDLE(#${BUILD2_ISSUE:-_}) q_idle=$QA_IDLE(#${QA_ISSUE:-_}) r_idle=$REVIEW_IDLE(#${REVIEW_ISSUE:-_}) g_idle=$GROOM_IDLE"
+
+  # Intake lane: refine Backlog → Ready (super-groom on the groom providers) until the
+  # Backlog is drained. Deliberately NOT gated on the build pipeline being empty, so the
+  # backlog gets groomed while build/qa keep running; the groom never spends Claude's or
+  # Codex's budget. Derated: one groomer at a time, and only while Ready is at or below
+  # ${GROOM_READY_FLOOR} (groom.ready_floor) — an agent run every tick needlessly drains
+  # the very quota review/build need.
+  if [ "${GROOM_ENABLED:-true}" = "true" ] && [ "$BACKLOG" -gt 0 ] && [ "$GROOM_IDLE" -eq 1 ] \
+     && [ "${READY:-0}" -le "${GROOM_READY_FLOOR:-1}" ]; then
+    GROOM_SIG=$(echo "$PROJECT_ITEMS_JSON" | jq -r '[.items[] | select(.status == "Backlog") | .content.number] | "\(length):\(if length > 0 then max else 0 end)"')
+    GROOM_LAST_SIG=$(jq -r '.sig // ""' "$GROOM_STATE" 2>/dev/null || echo "")
+    GROOM_LAST_AT=$(jq -r '.at // 0' "$GROOM_STATE" 2>/dev/null || echo 0)
+    if [ "$GROOM_SIG" != "$GROOM_LAST_SIG" ] || [ $(( $(date +%s) - ${GROOM_LAST_AT:-0} )) -ge "${GROOM_COOLDOWN:-1800}" ]; then
+      dispatch_groom
+    else
+      log "groom skipped — backlog unchanged (${GROOM_SIG}); forced groom in ≤${GROOM_COOLDOWN}s"
+    fi
+  fi
 
   if [ "$READY" -eq 0 ] && [ "$BUILDING" -eq 0 ] && [ "$QA" -eq 0 ] && [ "$REVIEW" -eq 0 ] \
-     && [ "$BUILD_IDLE" -eq 1 ] && [ "$QA_IDLE" -eq 1 ] && [ "$REVIEW_IDLE" -eq 1 ]; then
-    log "✅ all active-pipeline columns empty and all lanes idle — exiting cleanly"
+     && [ "${BACKLOG:-0}" -eq 0 ] && [ "$GROOM_IDLE" -eq 1 ] \
+     && [ "$BUILD_IDLE" -eq 1 ] && [ "$BUILD2_IDLE" -eq 1 ] && [ "$QA_IDLE" -eq 1 ] && [ "$REVIEW_IDLE" -eq 1 ]; then
+    log "✅ all columns empty (incl. Backlog) and all lanes idle — exiting cleanly"
     break
   fi
 
@@ -727,26 +1102,27 @@ while true; do
 
   if can_dispatch && [ "$REVIEW" -gt 0 ] && [ "$REVIEW_IDLE" -eq 1 ]; then
     if top_card_in_column "Review"; then
-      dispatch_lane review "$TOP_ISSUE"
-      ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
+      # Reviewer merges on evidence (QA green + review findings clean + security S1+S2 clean +
+      # truth at threshold). No governance handoff (retired 2026-10-14).
+      if dispatch_lane review "$TOP_ISSUE"; then ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1)); fi
     fi
   fi
   QA_FREE=$QA_IDLE
   if can_dispatch && [ "$QA" -gt 0 ] && [ "$QA_IDLE" -eq 1 ]; then
     if top_card_in_column "QA"; then
-      dispatch_lane qa "$TOP_ISSUE"
-      ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1)); QA_FREE=0
+      if dispatch_lane qa "$TOP_ISSUE"; then ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1)); QA_FREE=0; fi
     fi
   fi
   # Ready: the top card's label picks the lane — `qa` skips Building (Tester),
   # anything else is built first. A busy lane waits for the next tick.
-  if can_dispatch && [ "$READY" -gt 0 ] && { [ "$BUILD_IDLE" -eq 1 ] || [ "$QA_FREE" -eq 1 ]; }; then
+  if can_dispatch && [ "$READY" -gt 0 ] && { [ "$BUILD_IDLE" -eq 1 ] || [ "$BUILD2_IDLE" -eq 1 ] || [ "$QA_FREE" -eq 1 ]; }; then
     if top_card_in_column "Ready"; then
       if [ "$(card_lane "$TOP_ISSUE")" = "qa" ]; then
-        [ "$QA_FREE" -eq 1 ] && { dispatch_lane qa "$TOP_ISSUE"; ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1)); }
+        if [ "$QA_FREE" -eq 1 ] && dispatch_lane qa "$TOP_ISSUE"; then ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1)); fi
       elif [ "$BUILD_IDLE" -eq 1 ]; then
-        dispatch_lane build "$TOP_ISSUE"
-        ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1))
+        if dispatch_lane build "$TOP_ISSUE"; then ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1)); fi
+      elif [ "${BUILD_SLOTS:-1}" -ge 2 ] && [ "$BUILD2_IDLE" -eq 1 ]; then
+        if dispatch_lane build2 "$TOP_ISSUE"; then ACTIVE_WORKERS=$((ACTIVE_WORKERS + 1)); fi
       fi
     fi
   fi
@@ -758,7 +1134,7 @@ while true; do
   #    occupancy is deliberately NOT part of this condition: the runaway this gate
   #    exists to catch is a pipeline that is 100% busy and lands nothing, and the old
   #    `AND no lane active` clause made that case unhaltable (293 ticks, 0 merges).
-  if ! record_cycle_progress "$(done_signature)"; then
+  if { [ "$DISPATCH_COUNT" -gt "${PREV_DISPATCH_COUNT:-0}" ] || [ "$ACTIVE_WORKERS" -gt 0 ]; } && ! record_cycle_progress "$(done_signature)"; then
     log "🛑 halt — RUNAWAY: no card reached Done in ${NO_PROGRESS_CYCLES} dispatch cycles"
     runaway_summary
     break
@@ -772,10 +1148,8 @@ while true; do
     break
   fi
 
+  PREV_DISPATCH_COUNT=$DISPATCH_COUNT
   sleep "$TICK_SECONDS"
 done
 
 log "super-board run finished. manifest: $RUN_MANIFEST"
-if jq -e '.calibration.enabled == true' "$CONFIG_PATH" >/dev/null 2>&1; then
-  log "calibration skipped: legacy runner has no supervising skill host; final receipt and installed-skill delegation are required. Exit 0 alone does not prove selected work landed."
-fi

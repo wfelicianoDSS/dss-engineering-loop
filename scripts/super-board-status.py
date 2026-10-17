@@ -504,20 +504,6 @@ def main() -> int:
         )
         return 64
     config_path = Path(f".claude/super-board/configs/{config_slug}.json")
-    if "--metrics" in sys.argv:
-        # Autonomy metrics (intervention ledger) live in their own script.
-        import subprocess
-
-        metrics_args = [
-            sys.executable,
-            str(Path(__file__).resolve().parent / "super-board-metrics.py"),
-            "--config", str(config_path),
-        ]
-        if "--since" in sys.argv:
-            index = sys.argv.index("--since")
-            if index + 1 < len(sys.argv):
-                metrics_args += ["--since", sys.argv[index + 1]]
-        return subprocess.call(metrics_args)
     if not config_path.is_file():
         print(f"config not found: {config_path}", file=sys.stderr)
         return 66

@@ -9,7 +9,6 @@
 set -euo pipefail
 exec python3 - "${BASH_SOURCE[0]}" "$@" <<'PY'
 import argparse
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -75,17 +74,6 @@ except (OSError, ValueError, AttributeError) as error:
 if not explicit and config.get('usage_fallback', 'none') != 'codex':
     fail(f'Codex fallback refused: usage_fallback is not "codex" in {config_path}; pass --codex for an explicit Codex run.', 78)
 
-column = card['status']
-def result(status, detail):
-    print(json.dumps({'status': status, 'column': column, 'detail': detail}))
-
-readiness = script_path.with_name('super-board-verification-ready.py')
-def require_verification_ready():
-    if subprocess.run([sys.executable, str(readiness), '--config', str(config_path)]).returncode:
-        result('halted', 'verification-readiness: repair verify_commands; preserve claims, worktrees and card state, then restart explicitly')
-        sys.exit(9)
-require_verification_ready()
-
 def git_path(option):
     return Path(subprocess.check_output(['git', 'rev-parse', option], text=True).strip()).resolve()
 
@@ -97,33 +85,17 @@ except subprocess.CalledProcessError:
     fail('Codex lane must start inside the target git repository')
 os.chdir(root)
 helper = script_path.with_name('super-board-github-read.py')
+column = card['status']
+def result(status, detail):
+    print(json.dumps({'status': status, 'column': column, 'detail': detail}))
+
 if not helper.exists() or subprocess.run([sys.executable, str(helper), '--check']).returncode:
     result('halted', 'required GitHub reads halted or helper missing; preserve claims and worktrees')
     sys.exit(79)
 
-resolver_path = script_path.with_name('super-board-skills-ready.py')
-try:
-    spec = importlib.util.spec_from_file_location('skills_ready', resolver_path)
-    resolver = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(resolver)
-    resolver.hydrate([card], root)
-    skills = resolver.report(root, 'codex', [card], lane=args.lane,
-                             home=os.environ.get('SUPER_BOARD_SKILLS_HOME'), catalog=os.environ.get('SUPER_BOARD_SKILLS_CATALOG'))
-except SystemExit as error:
-    result('halted', 'required GitHub reads halted while hydrating skills; preserve claims and worktrees')
-    sys.exit(error.code)
-except (OSError, ValueError, TypeError, KeyError) as error:
-    result('halted', 'skills-readiness: ' + str(error))
-    sys.exit(64)
-if not skills['ready']:
-    result('halted', 'skills-readiness: missing ' + ', '.join(dict.fromkeys(e['name'] for e in skills['entries'] if e['status'] == 'missing')))
-    sys.exit(10)
-
 skill = {'build': 'super-build', 'qa': 'super-qa', 'review': 'super-review'}[args.lane]
 section = {'build': 'Builder', 'qa': 'Tester', 'review': 'Reviewer'}[args.lane]
 prompt = f'''Run {skill} for issue #{card['number']} as a Codex lane worker.
-First operation: recheck .claude/bin/super-board-skills-ready.py --root {root} --host codex --cards - --lane {args.lane} with the Card JSON below as a one-element stdin array, before worktree creation, classification or lifecycle writes. Exit 10 means status=halted, detail=skills-readiness:, preserve all state. Load resolved_path files and only declared fallback IDs from the report. Before activating any conditional helper, repeat with --require <exact-name>.
-Resolved skill report: {json.dumps(skills)}
 Config: {config_path}
 Card: {json.dumps(card)}
 Read .claude/skills/{skill}/SKILL.md and .claude/skills/super-board/references/run.md → {section} lifecycle; follow all its board, branch, worktree, comments, test and merge requirements.
@@ -131,17 +103,17 @@ Source .claude/bin/super-board-gh-guard.sh and use its quota checks. Required Gi
 Use .claude/bin/super-board-card.sh for board reads/moves and .claude/bin/super-board-pr-body.sh for owned PR blocks; follow writing-standard.md and pr-author-notes.md.
 Use your own worktree under .claude/worktrees/; never edit the main checkout. Clean up on ordinary exit, preserve work on halt/interruption.
 Codex adaptation: do not launch Claude or other sub-agents. Perform preflight, classification, independent review and truth-check duties inline. This changes the execution host, never the evidence requirements, confidence threshold or merge policy.
-Return JSON: status=advanced|bounced|blocked|human-gate|failed|halted; column=current board column; detail=one line; prUrl/branch when known, otherwise null; priorFindings=review counts or null. A non-advanced exit ends this card's lane chain. On merge-gate exit 9, return status=halted with detail starting exactly "verification-readiness:"; preserve work and never bounce/retry.
+Return JSON: status=advanced|bounced|blocked|human-gate|failed|halted; column=current board column; detail=one line; prUrl/branch when known, otherwise null; priorFindings=review counts or null. A non-advanced exit ends this card's lane chain.
 '''
 if args.lane == 'build':
-    prompt += '''Before creating any worktree or changing code, perform run.md's Builder pre-flight inline: call super-board-preflight.sh, judge its candidates semantically, and act on proceed/hold/sequence/skipped. Blind preflight leaves Ready and returns failed. Your own issue branch PR is not a duplicate. Read the issue and all comments; preserve qa/bug/feature labels. Existing docs/ux/tests/refactor/tech-debt rows keep their label chain: classify complexity without adding feature/bug. If truly untyped, classify feature or bug, re-run skills-ready on the proposed labelled card before adding that label, never qa. Then follow the Builder lifecycle.
+    prompt += '''Before creating any worktree or changing code, perform run.md's Builder pre-flight inline: call super-board-preflight.sh, judge its candidates semantically, and act on proceed/hold/sequence/skipped. Blind preflight leaves Ready and returns failed. Your own issue branch PR is not a duplicate. Read the issue and all comments; preserve qa/bug/feature labels. If untyped, classify feature or bug and add that label, never qa. Then follow the Builder lifecycle.
 '''
 elif args.lane == 'qa' and card['status'] == 'Ready':
     prompt += 'This qa-labelled Ready card skips Building: move Ready → QA and create the issue branch from the base; test the existing product per run.md qa cards.\n'
 elif args.lane == 'review':
     prompt += '''The owner explicitly chose run --codex: you may review and own the merge. First load the latest <!-- super-review:report -->; grade prior R-ids fixed/not fixed/no longer applies, bounce any not fixed and edit the same report in place. Form hypotheses from the issue AC and diff before reading the Builder narrative.
-Rerun the Tester's tests. When truth_gate triggers, apply super-review's fixed Adversarial mode brief inline in two distinct passes (code-grounder and historian); collect evidence and aggregate confidence against truth_threshold. Over-engineering is Should fix, never Blocker alone and never lowers confidence. Missing evidence fails closed.
-Merge ONLY through the unchanged .claude/bin/super-board-merge-gate.sh, pinning the exact head you reviewed at review pass using --expect-head "$HEAD" --config <config> --pr <N> --subject <title> --body-file <msg.md>. Never run bare gh pr merge or bypass the gate. Follow run.md Merge protocol and route every gate exit exactly: 2/5 rebase pass, 3 Blocked, 4 stay Review, 6 fresh review, 7/8 human gate with pinned approval-request; 9 verification-readiness means halt and preserve card/worktree/approval/claims until config repair and explicit restart, never a Build bounce or rebase retry. Respect human_approves_merge and merge_policy. Confirm MERGED <sha>, fetch base and prove merge-base --is-ancestor <sha> origin/<base> before closing issue or moving Done.
+Rerun the Tester's tests. Security gate (required, .claude/skills/super-board/references/security-gate.md): run S1 via `claude -p "/security-review"` in the review worktree and S2 the .claude/skills/security-audit skill in bounded PR-diff mode with one inline cold verifier pass; findings.json must PASS validate-findings.cjs; record the Security: line pinned to the head. Either pass cannot run → unverified, Blocked 🛡, never merge. When truth_gate triggers, apply super-review's fixed Adversarial mode brief inline in two distinct passes (code-grounder and historian); collect evidence and aggregate confidence against truth_threshold. Over-engineering is Should fix, never Blocker alone and never lowers confidence. Missing evidence fails closed.
+Merge ONLY through the unchanged .claude/bin/super-board-merge-gate.sh, pinning the exact head you reviewed at review pass using --expect-head "$HEAD" --config <config> --pr <N> --subject <title> --body-file <msg.md>. Never run bare gh pr merge or bypass the gate. Follow run.md Merge protocol and route every gate exit exactly: 2/5 rebase pass, 3 Blocked, 4 stay Review, 6 fresh review, 7/8 human gate with pinned approval-request. Respect human_approves_merge and merge_policy. Confirm MERGED <sha>, fetch base and prove merge-base --is-ancestor <sha> origin/<base> before closing issue or moving Done.
 '''
 
 counts = {key: {'type': 'integer'} for key in ['fixed', 'notFixed', 'noLongerApplies']}
@@ -186,20 +158,15 @@ with tempfile.TemporaryDirectory(prefix='super-board-codex-') as temporary:
     try:
         child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=sys.stderr, text=True)
         child.communicate(prompt)
-        require_verification_ready()
         if child.returncode:
-            result('halted' if child.returncode in (9, 10, 79) else 'failed',
-                   'verification-readiness: repair verify_commands and restart explicitly; preserve work'
-                   if child.returncode == 9 else 'skills-readiness: required skills became unavailable; preserve work' if child.returncode == 10 else f'codex exec exited {child.returncode}')
-            sys.exit(child.returncode if child.returncode in (9, 10, 79) else 1)
+            result('halted' if child.returncode == 79 else 'failed', f'codex exec exited {child.returncode}')
+            sys.exit(child.returncode if child.returncode == 79 else 1)
         parsed = json.loads(output.read_text())
         if (not isinstance(parsed, dict) or parsed.get('status') not in properties['status']['enum']
                 or not all(isinstance(parsed.get(key), str) for key in ['column', 'detail'])):
             raise ValueError('lane result needs status, column and detail')
         print(json.dumps(parsed))
-        sys.exit(10 if parsed['status'] == 'halted' and parsed['detail'].startswith('skills-readiness:')
-                 else 9 if parsed['status'] == 'halted' and parsed['detail'].startswith('verification-readiness:')
-                 else 79 if parsed['status'] == 'halted' else 0)
+        sys.exit(79 if parsed['status'] == 'halted' else 0)
     except (OSError, ValueError) as error:
         result('failed', f'Codex returned no valid lane result: {error}')
         sys.exit(1)
