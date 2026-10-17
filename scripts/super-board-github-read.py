@@ -5,10 +5,15 @@ A logical read gets three total attempts. Success resets its own sequence; other
 reads cannot reset it. Permanent query/auth errors stop on the first attempt.
 The halt file is shared through the main checkout, including linked worktrees.
 Only an explicit new run clears it with --resume after preserving the old reason.
-Mutations never enter this retry helper. For the agent-facing kinds in FORMS, a
-payload that fails its shape on every attempt is the caller's malformed read, not
-an outage: that call exits 64 with the valid form and the run keeps going. Scripts
-whose commands are fixed set SB_GITHUB_READ_STRICT=1 to keep halting on it.
+Each halt records a class: transient_read (timeout/5xx/network/secondary limit),
+permanent_read (auth/permission/query), shape (strict shape rejection) or
+uncertain_write (--halt after a mutation). --auto-resume probes only a
+transient_read halt, with a fixed backoff, and stops after six failures. A
+missing class is permanent_read. Mutations never enter this retry helper. For
+the agent-facing kinds in FORMS, a payload that fails its shape on every attempt
+is the caller's malformed read, not an outage: that call exits 64 with the valid
+form and the run keeps going. Scripts whose commands are fixed set
+SB_GITHUB_READ_STRICT=1 to keep halting on it.
 """
 from __future__ import annotations
 
@@ -22,6 +27,20 @@ import sys
 import time
 
 HALTED = 79
+# --auto-resume exit codes for the caller: 3 = not ours to retry, 4 = gave up.
+NOT_TRANSIENT = 3
+AUTO_EXHAUSTED = 4
+# Waits between the six probes of a transient_read halt (2, 5, 10, 20, 30 min).
+AUTO_BACKOFF = (120, 300, 600, 1200, 1800, 1800)
+MAX_AUTO_ATTEMPTS = 6
+
+
+def now() -> int:
+    """Injected clock for tests (SB_NOW); the wall clock otherwise."""
+    try:
+        return int(os.environ['SB_NOW'])
+    except (KeyError, ValueError):
+        return int(time.time())
 
 
 class ReadHalted(Exception):
@@ -73,13 +92,14 @@ def check_halt():
         raise ReadHalted('GitHub reads are halted; inspect the saved reason and explicitly restart the run')
 
 
-def halt(reason, attempts, operation=None):
+def halt(reason, attempts, operation=None, cls='permanent_read'):
     path = halt_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Exclusive creation keeps the first failure's evidence when workers trip together.
     try:
         with path.open('x') as stream:
-            json.dump({'reason': reason, 'attempts': attempts, 'at': int(time.time()), 'operation': operation}, stream)
+            json.dump({'reason': reason, 'class': cls, 'attempts': attempts,
+                       'at': now(), 'operation': operation}, stream)
     except FileExistsError:
         pass
     raise ReadHalted(reason)
@@ -404,7 +424,8 @@ def read(args, kind='json', meta=None, recovering=False):
                 except ValueError:
                     pass
             if permanent_error(diagnostic):
-                halt('GitHub rejected a required read (query, authentication, or permission error); fix it before restarting', attempt, operation)
+                halt('GitHub rejected a required read (query, authentication, or permission error); fix it before restarting',
+                     attempt, operation, cls='permanent_read')
             if result.returncode:
                 shape_only = False
                 status = re.search(r'HTTP [0-9]{3}', result.stderr)
@@ -426,7 +447,95 @@ def read(args, kind='json', meta=None, recovering=False):
             time.sleep(max(0, delay) * attempt)
     if shape_only and kind in FORMS and not os.environ.get('SB_GITHUB_READ_STRICT'):
         raise ValueError(f'{last}; this call failed, the run continues. Valid form: --kind {kind} -- {FORMS[kind]}')
-    halt(f'{last}; stopped after 3 failed attempts', 3, operation)
+    halt(f'{last}; stopped after 3 failed attempts', 3, operation,
+         cls='shape' if shape_only else 'transient_read')
+
+
+def resume_saved(path, kind=None, meta_path=None, command=None):
+    """Re-run the saved read (or the caller's corrected one) and archive the halt on success."""
+    record = json.loads(path.read_text())
+    operation = record.get('operation')
+    if not isinstance(operation, dict):
+        raise ReadHalted('saved failure needs manual outcome reconciliation before restart')
+    if command:
+        if kind != operation['kind']:
+            raise ValueError('replacement recovery read must validate the same evidence kind')
+        meta = json.loads(Path(meta_path).read_text()) if meta_path else operation.get('meta')
+        if kind == 'diff':
+            validate(json.dumps(meta), 'metadata')
+        read(command, kind, meta, recovering=True)
+    else:
+        read(operation['args'], operation['kind'], operation.get('meta'), recovering=True)
+    read(['api', 'rate_limit'], 'quota', recovering=True)
+    path.replace(path.with_name(f'github-halt-{time.time_ns()}.json'))
+
+
+def _attention(path, failure):
+    """One line for the orchestrator; the halt itself is never deleted."""
+    log = path.parent / 'needs-attention.log'
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open('a') as stream:
+            stream.write('%s github-read auto-resume exhausted after %d attempts: %s (halt: %s)\n'
+                         % (time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now())),
+                            MAX_AUTO_ATTEMPTS, failure[:200], path))
+    except OSError:
+        pass
+
+
+def _write_record(path, record):
+    temp = path.with_name(path.name + '.tmp')
+    temp.write_text(json.dumps(record))
+    temp.replace(path)
+
+
+def auto_resume():
+    """Probe a transient_read halt on a fixed backoff. Never touches any other class."""
+    path = halt_path()
+    if not path.exists():
+        print(json.dumps({'action': 'none'}))
+        return 0
+    try:
+        record = json.loads(path.read_text())
+    except ValueError:
+        record = {}
+    cls = record.get('class') or 'permanent_read'
+    if cls != 'transient_read' or not isinstance(record.get('operation'), dict):
+        print(json.dumps({'action': 'skip', 'class': cls}))
+        return NOT_TRANSIENT
+    attempts = int(record.get('auto_attempts') or 0)
+    if attempts >= MAX_AUTO_ATTEMPTS:
+        print(json.dumps({'action': 'stop', 'attempts': attempts, 'next_probe_at': 0}))
+        return AUTO_EXHAUSTED
+    due = int(record.get('next_probe_at') or 0)
+    if now() < due:
+        print(json.dumps({'action': 'wait', 'attempts': attempts, 'next_probe_at': due}))
+        return 0
+    try:
+        resume_saved(path)
+    except (ReadHalted, ValueError, OSError, subprocess.SubprocessError) as error:
+        failure = str(error)
+    else:
+        print(json.dumps({'action': 'resumed'}))
+        return 0
+    attempts += 1
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        pass
+    record['auto_attempts'] = attempts
+    record['last_auto_error'] = failure[:300]
+    if attempts >= MAX_AUTO_ATTEMPTS:
+        record['next_probe_at'] = 0
+        _attention(path, failure)
+        _write_record(path, record)
+        print(json.dumps({'action': 'stop', 'attempts': attempts, 'next_probe_at': 0}))
+        return AUTO_EXHAUSTED
+    record['next_probe_at'] = now() + AUTO_BACKOFF[min(attempts - 1, len(AUTO_BACKOFF) - 1)]
+    _write_record(path, record)
+    print(json.dumps({'action': 'wait', 'attempts': attempts,
+                      'next_probe_at': record['next_probe_at']}))
+    return 0
 
 
 def main():
@@ -436,31 +545,21 @@ def main():
     parser.add_argument('--check', action='store_true')
     parser.add_argument('--halt', help='record an unresolved mutation outcome and stop; never retry it')
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--auto-resume', action='store_true',
+                        help='probe a transient_read halt on its backoff (0 = continue/wait, 3/4 = stop)')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     try:
         if args.halt:
             os.environ['SB_GITHUB_HALT_FILE'] = str(global_halt_path())
-            halt(args.halt, 1)
+            halt(args.halt, 1, cls='uncertain_write')
+        if args.auto_resume:
+            return auto_resume()
         if args.resume:
             path = halt_path()
             if path.exists():
-                record = json.loads(path.read_text())
-                operation = record.get('operation')
-                if not isinstance(operation, dict):
-                    raise ReadHalted('saved failure needs manual outcome reconciliation before restart')
-                if command:
-                    if args.kind != operation['kind']:
-                        raise ValueError('replacement recovery read must validate the same evidence kind')
-                    meta = json.loads(Path(args.meta).read_text()) if args.meta else operation.get('meta')
-                    if args.kind == 'diff':
-                        validate(json.dumps(meta), 'metadata')
-                    read(command, args.kind, meta, recovering=True)
-                else:
-                    read(operation['args'], operation['kind'], operation.get('meta'), recovering=True)
-                read(['api', 'rate_limit'], 'quota', recovering=True)
-                path.replace(path.with_name(f'github-halt-{time.time_ns()}.json'))
+                resume_saved(path, args.kind, args.meta, command)
             return 0
         if args.check:
             check_halt()
