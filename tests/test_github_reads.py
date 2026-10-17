@@ -317,6 +317,18 @@ top_card_in_column Review
         self.assertEqual(len(attention.read_text().splitlines()), 1, 'only one attention line')
 
 
+    def test_rest_slurped_issue_pages_validate(self):
+        pages = [[{'number': 1}], [{'number': 2}]]
+        r = self.read([{'out': json.dumps(pages)}], 'issues')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), pages)
+
+    def test_malformed_rest_slurped_page_halts(self):
+        pages = [[{'number': 1}], [{'number': 'two'}]]
+        r = self.read([{'out': json.dumps(pages)}], 'issues')
+        self.assertEqual(r.returncode, 79)
+        self.assertEqual(self.log.read_text(), '3')
+
     def test_runner_auto_resume_waits_and_stops_on_a_human_halt(self):
         script = ('SB_LIB_ONLY=1 . "$1"\nset +e\nlog() { :; }\n'
                   'auto_resume_halt; echo "rc=$? wait=$AUTO_RESUME_WAIT"\n')

@@ -66,7 +66,8 @@ DEFAULT_ALWAYS_HUMAN = {
     "schema": {
         "labels": ["schema", "destructive"],
         "paths": [],
-        "keywords": ["drop table", "drop column", "truncate table", "rename column", "drop schema"],
+        "keywords": ["drop table", "drop column", "truncate table", "rename column", "drop schema",
+                     "delete from"],
     },
 }
 DEFAULT_MIGRATION_GLOBS = [

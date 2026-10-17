@@ -28,6 +28,16 @@ if [ -f .claude/super-board/github-halt.json ]; then
   python3 .claude/bin/super-board-github-read.py --resume >> /tmp/board-autostart.log 2>&1 || true
 fi
 
+# The runner refuses to start on a drifted checkout (exit 73). Autostart syncs the
+# base branch itself, but only when the tree is clean — local edits are never discarded.
+BASE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("base_branch","main"))' "$CFG" 2>/dev/null || echo main)
+CURRENT=$(git branch --show-current 2>/dev/null || true)
+if [ -n "$CURRENT" ] && [ "$CURRENT" != "$BASE" ] && [ -z "$(git status --porcelain)" ]; then
+  echo "[$(date -u +%FT%TZ)] syncing checkout ${CURRENT} → ${BASE}" >> /tmp/board-autostart.log
+  git fetch origin --prune >> /tmp/board-autostart.log 2>&1 \
+    && git checkout -f -B "$BASE" "origin/$BASE" >> /tmp/board-autostart.log 2>&1 || true
+fi
+
 if pgrep -f "super-board-run.sh fieldops" >/dev/null 2>&1; then
   echo "[$(date -u +%FT%TZ)] runner already running — not starting another" >> /tmp/board-autostart.log
   exit 0

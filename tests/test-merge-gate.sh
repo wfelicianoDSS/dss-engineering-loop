@@ -494,6 +494,20 @@ RC=0; STUB_OID="$SHA" "$GATE" --config "$TMP/invalid.json" --pr 1 --dry-run >/de
 [ ! -s "$GH_LOG" ] || fail "unready setup must not call GitHub"
 teardown
 
+# 26 — keyword gates scan code, not test evidence: a DELETE FROM under tests/ is not a
+#      destructive production operation; the same line under src/ still gates.
+head_setup
+KW_DIFF=$'diff --git a/tests/seed.cs b/tests/seed.cs\n--- a/tests/seed.cs\n+++ b/tests/seed.cs\n@@ -1 +1 @@\n+DELETE FROM users;\n'
+RC=0; STUB_OID="$SHA" STUB_META="$(meta "" tests/seed.cs)" STUB_DIFF="$KW_DIFF" gate --expect-head "$SHA" >/dev/null 2>&1 || RC=$?
+[ "$RC" -eq 0 ] || fail "a DELETE under tests/ must not trip the destructive gate, got $RC"
+SRC_DIFF=${KW_DIFF//tests\//src\/}
+RC=0; STUB_OID="$SHA" STUB_META="$(meta "" src/seed.cs)" STUB_DIFF="$SRC_DIFF" gate --expect-head "$SHA" >/dev/null 2>&1 || RC=$?
+[ "$RC" -eq 7 ] || fail "a DELETE under src/ must still gate to a human, got $RC"
+cfgset '.merge_policy = {keyword_exclude: []}'
+RC=0; STUB_OID="$SHA" STUB_META="$(meta "" tests/seed.cs)" STUB_DIFF="$KW_DIFF" gate --expect-head "$SHA" >/dev/null 2>&1 || RC=$?
+[ "$RC" -eq 7 ] || fail "keyword_exclude [] must scan tests/ too, got $RC"
+teardown
+
 # A real configured command still runs; a failed project check blocks the merge.
 head_setup
 jq '.verify_commands = ["", " ", "git rev-parse --verify nonexistent-ref"]' "$TMP/c.json" > "$TMP/failing.json"

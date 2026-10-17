@@ -1102,6 +1102,33 @@ if [ -n "$CURRENT_BRANCH" ] && [ -n "${BASE_BRANCH:-}" ] && [ "$CURRENT_BRANCH" 
   exit 73
 fi
 
+# Migration reachability precondition (run-workflow.md §Preconditions 7). An env the
+# robot may migrate but cannot check is a gate that can never pass: refuse before a
+# wave builds work the merge gate would have to strand. `commands.<env> = "-"` means
+# the deploy pipeline applies it, so there is nothing to check here.
+MIG_ENVS=$(jq -r '(.migrations // {}) as $m
+  | ($m.allowed_envs // [])[]
+  | select(((($m.commands // {})[.] // "") != "") and ((($m.commands // {})[.] // "") != "-")
+           and ((($m.checks // {})[.] // "") == ""))' "$CONFIG_PATH" 2>/dev/null || true)
+if [ -n "$MIG_ENVS" ]; then
+  MIG_ENV=$(printf '%s\n' "$MIG_ENVS" | head -1)
+  echo "refusing to start: migrations.commands.${MIG_ENV} is set but migrations.checks.${MIG_ENV} is missing." >&2
+  echo "  Add a read-only reachability check (migrations.checks.${MIG_ENV}) or set commands.${MIG_ENV} = \"-\"." >&2
+  exit 76
+fi
+if [ -n "$(jq -r '(.migrations.checks // {}) | keys[]' "$CONFIG_PATH" 2>/dev/null || true)" ]; then
+  while IFS=$'\t' read -r mig_env mig_check; do
+    [ -n "$mig_env" ] || continue
+    if ! bash -c "$mig_check" >/dev/null 2>&1; then
+      echo "refusing to start: migrations.checks.${mig_env} failed — the ${mig_env} database is not reachable." >&2
+      echo "  Fix the connection (or set commands.${mig_env} = \"-\") before starting." >&2
+      exit 76
+    fi
+  done <<EOF
+$(jq -r '(.migrations.checks // {}) | to_entries[] | [.key, .value] | @tsv' "$CONFIG_PATH" 2>/dev/null || true)
+EOF
+fi
+
 # Existing legacy work is inspected/moved by a human, never deleted on upgrade.
 check_legacy_worktrees
 cleanup_stale_worktrees
