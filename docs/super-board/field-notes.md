@@ -80,3 +80,10 @@ these live in the runner rather than here.
   `claude -p … super-board run` worker exists; stop orphans first
   (`pkill -f 'claude -p .*super-board run'`), otherwise the new runner exits and only the guard
   remains.
+- **Stalled-with-work is visible.** The watchdog already detects "runner up but idle with N
+  pending cards" (two consecutive stalled checks, then a restart). With the LLM fixer disabled it
+  now writes a `needs-attention.log` entry and sends the configured notification instead of
+  spending worker quota; a second failure escalates.
+- **Kind is classified by payload, not command.** `kind issues` accepts either the GraphQL
+  dependency-page shape or REST `--paginate --slurp` pages. Classifying by the command would
+  reject a mislabeled caller; payload-first validates what actually arrived, which is safer.
