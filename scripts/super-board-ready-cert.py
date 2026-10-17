@@ -27,19 +27,28 @@ import sys
 DEFAULT_DIR = '.claude/super-board/ready-certs'
 
 
-def content_hash(title: str, body: str, labels) -> str:
-    names = sorted(
+def _names(labels) -> list:
+    return sorted(
         (label if isinstance(label, str) else (label or {}).get('name', ''))
         for label in (labels or [])
     )
-    payload = f"{title}\n{body}\n{','.join(names)}"
-    return hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]
+
+
+def content_hash(title: str, body: str, labels) -> str:
+    return hashlib.sha256(f"{title}\n{body}\n{','.join(_names(labels))}".encode('utf-8')).hexdigest()[:12]
+
+
+def snapshot_hash(title: str, labels) -> str:
+    # Title + labels only: the fields the runner's board snapshot carries. The
+    # certificate records both so a snapshot-only reader can still match.
+    return hashlib.sha256(f"{title}\n{','.join(_names(labels))}".encode('utf-8')).hexdigest()[:12]
 
 
 def certificate(item, checks: str) -> str:
     title, body, labels = fields(item)
     digest = content_hash(title, body, labels)
-    return f'<!-- sb-ready v1 hash={digest} checks={checks} -->'
+    snap = snapshot_hash(title, labels)
+    return f'<!-- sb-ready v1 hash={digest} snap={snap} checks={checks} -->'
 
 
 def find_item(items, number: int):

@@ -19,15 +19,31 @@ import pathlib
 import re
 import sys
 
-MARK = re.compile(r"<!--\s*sb-ready v1 hash=([0-9a-f]{12})")
+MARK = re.compile(r"<!--\s*sb-ready v1 hash=([0-9a-f]{12})(?: snap=([0-9a-f]{12}))?")
+
+
+def _hash(payload: str) -> str:
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
 def content_hash(title: str, body: str, labels) -> str:
     names = sorted(
         (l if isinstance(l, str) else (l or {}).get("name", "")) for l in (labels or [])
     )
-    payload = f"{title}\n{body}\n{','.join(names)}"
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    return _hash(f"{title}\n{body}\n{','.join(names)}")
+
+
+def snapshot_hash(title: str, labels) -> str:
+    """Title + labels only — the fields the runner's board snapshot actually carries.
+
+    The full hash stays the source of truth when the caller has the body. The board
+    snapshot does not, so the certificate also carries this narrower hash; otherwise
+    every selection would look stale and re-groom the whole backlog forever.
+    """
+    names = sorted(
+        (l if isinstance(l, str) else (l or {}).get("name", "")) for l in (labels or [])
+    )
+    return _hash(f"{title}\n{','.join(names)}")
 
 
 def main() -> int:
@@ -54,15 +70,19 @@ def main() -> int:
         number = item.get("number", content.get("number"))
         if type(number) is not int:
             continue
-        wanted = content_hash(item.get("title", content.get("title")) or "",
-                              item.get("body", content.get("body")) or "",
-                              item.get("labels", content.get("labels")))
+        title = item.get("title", content.get("title")) or ""
+        labels = item.get("labels", content.get("labels"))
+        body = item.get("body", content.get("body"))
+        if "content" in item and "body" not in content:
+            wanted = snapshot_hash(title, labels)
+        else:
+            wanted = content_hash(title, body or "", labels)
         text = ""
         if args.comments_dir:
             path = pathlib.Path(args.comments_dir) / f"{number}.md"
             if path.exists():
                 text = path.read_text()
-        certified = MARK.findall(text)
+        certified = {value for pair in MARK.findall(text) for value in pair if value}
         if not certified or wanted not in certified:
             selected.append(number)
 

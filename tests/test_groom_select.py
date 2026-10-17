@@ -16,7 +16,8 @@ spec.loader.exec_module(groom_select)
 
 def cert(number, title, body, labels):
     h = groom_select.content_hash(title, body, labels)
-    return f"<!-- sb-ready v1 hash={h} checks=ac,deps,scope,risk -->"
+    snap = groom_select.snapshot_hash(title, labels)
+    return f"<!-- sb-ready v1 hash={h} snap={snap} checks=ac,deps,scope,risk -->"
 
 
 class GroomSelectTests(unittest.TestCase):
