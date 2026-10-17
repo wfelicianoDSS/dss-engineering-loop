@@ -299,4 +299,59 @@ doc = re.search(r"```json\n(.*?)```", open(sys.argv[1]).read(), re.S).group(1)
 sys.exit(0 if json.loads(doc) == json.load(open(sys.argv[2])) else 1)
 PY
 
-echo "PASS: test-install.sh (17 scenarios)"
+# 13 — install manifest: every control-plane file is recorded with the sha256 of
+#      the bytes that landed, so a later reinstall can tell pack content from a
+#      local edit. Skills are replaced wholesale and are not tracked.
+sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+T=$(mktemp -d)
+"$INSTALL" --no-hooks "$T" >/dev/null 2>&1
+M="$T/.claude/super-board/install-manifest.json"
+[ -f "$M" ] || fail "no install manifest written"
+jq -e --arg v "$(cat ../VERSION)" '.version == $v' "$M" >/dev/null || fail "manifest does not carry the pack version"
+jq -e '.files[".claude/bin/super-board-run.sh"] | test("^[0-9a-f]{64}$")' "$M" >/dev/null \
+  || fail "manifest has no sha256 for super-board-run.sh"
+[ "$(jq -r '.files[".claude/bin/super-board-run.sh"]' "$M")" = "$(sha "$T/.claude/bin/super-board-run.sh")" ] \
+  || fail "manifest hash does not match the installed file"
+jq -e '.files | has(".claude/workflows/super-board-wave.js")' "$M" >/dev/null || fail "workflows should be tracked"
+jq -e '.files | has(".claude/skills/super-board/SKILL.md") | not' "$M" >/dev/null \
+  || fail "skills are replaced wholesale and should not be tracked"
+rm -rf "$T"
+
+# 14 — a local edit survives a reinstall and is reported, never silently
+#      overwritten; the manifest keeps the pack hash so the next run still sees it.
+T=$(mktemp -d)
+"$INSTALL" --no-hooks "$T" >/dev/null 2>&1
+F="$T/.claude/bin/super-board-run.sh"
+printf '\n# local hotfix\n' >> "$F"
+LOCAL=$(sha "$F")
+OUT=$("$INSTALL" --no-hooks "$T" 2>&1)
+echo "$OUT" | grep -q 'kept local change: .claude/bin/super-board-run.sh — upstream it or pass --overwrite-local' \
+  || fail "a local change should be reported, got: $OUT"
+[ "$(sha "$F")" = "$LOCAL" ] || fail "the local change was overwritten"
+cmp -s "$T/.claude/bin/super-board-card.sh" ../scripts/super-board-card.sh \
+  || fail "an untouched file should still be refreshed"
+M="$T/.claude/super-board/install-manifest.json"
+[ "$(jq -r '.files[".claude/bin/super-board-run.sh"]' "$M")" != "$LOCAL" ] \
+  || fail "the manifest adopted the local edit — the next install would overwrite it"
+OUT=$("$INSTALL" --no-hooks "$T" 2>&1)
+echo "$OUT" | grep -q 'kept local change' || fail "a second reinstall must keep the local change again, got: $OUT"
+rm -rf "$T"
+
+# 15 — --overwrite-local takes the pack version and keeps the old file aside.
+T=$(mktemp -d)
+"$INSTALL" --no-hooks "$T" >/dev/null 2>&1
+F="$T/.claude/bin/super-board-run.sh"
+printf '\n# local hotfix\n' >> "$F"
+OUT=$("$INSTALL" --no-hooks --overwrite-local "$T" 2>&1)
+echo "$OUT" | grep -q 'local change replaced: .claude/bin/super-board-run.sh' \
+  || fail "--overwrite-local should report the replacement, got: $OUT"
+cmp -s "$F" ../scripts/super-board-run.sh || fail "--overwrite-local did not restore the pack version"
+B=$(ls "$T/.claude/bin/" | grep '^super-board-run.sh.local-' | head -1)
+[ -n "$B" ] || fail "--overwrite-local left no .local- backup"
+echo "$B" | grep -Eq '^super-board-run\.sh\.local-[0-9]{8,}$' || fail "backup should carry a timestamp, got: $B"
+grep -q '# local hotfix' "$T/.claude/bin/$B" || fail "the backup does not hold the replaced content"
+OUT=$("$INSTALL" --no-hooks "$T" 2>&1)
+if echo "$OUT" | grep -q 'kept local change'; then fail "after --overwrite-local the file should be clean, got: $OUT"; fi
+rm -rf "$T"
+
+echo "PASS: test-install.sh (20 scenarios)"
