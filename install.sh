@@ -5,12 +5,20 @@
 # .claude/settings.json (backed up first, never duplicated).
 #
 # Usage:
-#   ./install.sh [--no-hooks] [--protect-main] [target-project-dir]
+#   ./install.sh [--no-hooks] [--protect-main] [--overwrite-local] [target-project-dir]
 # Defaults to the current working directory. --no-hooks skips the guard hooks
 # and leaves settings.json untouched. --protect-main also wires the opt-in
 # guard that blocks direct and force pushes to main/master/base_branch; with
 # --no-hooks it installs that one guard alone. The installer asks nothing:
 # super-board onboard asks the questions (protect main is one of them).
+#
+# Control-plane files (scripts, workflows, hooks) are recorded with their
+# sha256 in .claude/super-board/install-manifest.json. On a reinstall, a file
+# that no longer matches the manifest is a LOCAL change: it is kept and
+# reported ("kept local change: …") instead of being silently overwritten.
+# --overwrite-local takes the pack version and keeps the old file as
+# <path>.local-<timestamp>. The first install after this change adopts the
+# current files as the baseline; there is no manifest to compare against yet.
 #
 # Output is grouped with emojis, one line per group of files (failures still name
 # the file). Environment: SUPER_BOARD_QUIET_NEXT=1 prints only the "🔧 installing"
@@ -25,12 +33,14 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS=1
 PROTECT=0
+OVERWRITE_LOCAL=0
 TARGET=""
 for arg in "$@"; do
   case "$arg" in
     --no-hooks) HOOKS=0 ;;
     --protect-main) PROTECT=1 ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    --overwrite-local) OVERWRITE_LOCAL=1 ;;
+    -h|--help) sed -n '2,/^$/p' "$0"; exit 0 ;;
     -*) echo "unknown option: $arg" >&2; exit 64 ;;
     *) TARGET="$arg" ;;
   esac
@@ -86,6 +96,83 @@ for skill in sys.argv[3:]:
 PY
 
 mkdir -p "$TARGET/.claude/skills" "$TARGET/.claude/bin"
+
+# ── install manifest: keep local edits to control-plane files ────────────────
+# scripts/, workflows/ and hooks/ are copied over an existing install. Without a
+# record, a reinstall silently overwrites a local hotfix — the "scripts/ vs
+# .claude/bin drift" that hides a control-plane fix. The manifest stores the
+# sha256 of what the pack last installed; a target file that differs from it is
+# a local change and is kept unless --overwrite-local is passed.
+MANIFEST_DIR="$TARGET/.claude/super-board"
+MANIFEST="$MANIFEST_DIR/install-manifest.json"
+# The backup suffix is only needed when a conflict is actually replaced, and it
+# must not add a date(1) dependency to a plain install (tests/test-get.sh runs
+# the installer with a minimal PATH).
+STAMP=""
+local_stamp() {
+  [ -n "$STAMP" ] && return 0
+  STAMP="$(date +%Y%m%d%H%M%S 2>/dev/null \
+    || python3 -c 'import time; print(time.strftime("%Y%m%d%H%M%S"))')"
+}
+OLD_MANIFEST="$(mktemp)"; NEW_MANIFEST="$(mktemp)"
+trap 'rm -f "$OLD_MANIFEST" "$NEW_MANIFEST"' EXIT
+if [ -f "$MANIFEST" ]; then
+  python3 - "$MANIFEST" > "$OLD_MANIFEST" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for path, sha in (data.get("files") or {}).items():
+    print("%s\t%s" % (path, sha))
+PY
+fi
+KEPT_LOCAL=0
+# Prefer the native hasher (fast); fall back to python3, which is already
+# required, so a minimal PATH (tests/test-get.sh) still works. No awk/cut.
+hash_file() {
+  local out
+  if command -v sha256sum >/dev/null 2>&1; then out=$(sha256sum "$1")
+  elif command -v shasum >/dev/null 2>&1; then out=$(shasum -a 256 "$1")
+  else out=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1")
+  fi
+  printf '%s' "${out%% *}"
+}
+manifest_hash() {
+  local line
+  line=$(grep -m1 -F -- "$1"$'\t' "$OLD_MANIFEST" 2>/dev/null) || true
+  [ -n "$line" ] || return 0
+  printf '%s' "${line#*$'\t'}"
+}
+record_file() { printf '%s\t%s\n' "$1" "$2" >> "$NEW_MANIFEST"; }
+# install_file <absolute-src> <path-under-target> [exec]
+# Keeps a locally modified file (recorded in the manifest with a different hash),
+# unless --overwrite-local is given. A skipped file keeps its old manifest hash,
+# so the next reinstall still sees it as modified instead of adopting the edit.
+install_file() {
+  local src="$1" rel="$2" mode="${3:-}" dest prev cur
+  dest="$TARGET/$rel"
+  prev="$(manifest_hash "$rel")"
+  if [ -f "$dest" ] && [ -n "$prev" ]; then
+    cur="$(hash_file "$dest")"
+    if [ "$cur" != "$prev" ]; then
+      if [ "$OVERWRITE_LOCAL" -eq 1 ]; then
+        local_stamp
+        cp -p "$dest" "$dest.local-$STAMP" 2>/dev/null || cp "$dest" "$dest.local-$STAMP"
+        echo "   ↺ local change replaced: $rel (backup: $rel.local-$STAMP)"
+      else
+        echo "   ⚠️  kept local change: $rel — upstream it or pass --overwrite-local"
+        record_file "$rel" "$prev"
+        KEPT_LOCAL=$((KEPT_LOCAL + 1))
+        return 0
+      fi
+    fi
+  fi
+  mkdir -p "$(dirname "$dest")"
+  copy_file "$src" "$dest"
+  if [ "$mode" = exec ]; then chmod +x "$dest"; fi
+  record_file "$rel" "$(hash_file "$src")"
+}
 
 # A project may keep the real skill directories elsewhere and symlink them into
 # .claude/skills — a layout some repos use to share one tree between .claude and
@@ -147,15 +234,14 @@ copy_file() {
 
 for script in super-board-project-verifier.py super-board-skills-ready.py super-board-calibration.py super-board-verification-ready.py super-board-github-read.py super-board-collect-state.py super-board-run.sh super-board-gh-guard.sh super-board-card.sh super-board-status.py super-board-wave-plan.sh super-board-codex-lane.sh super-board-codex-wave.sh super-board-deps.sh super-board-preflight.sh super-board-merge-gate.sh super-board-merge-policy.py super-board-approval.py super-board-env-check.sh super-board-agents-md.py super-board-settings.py super-board-setup.py super-board-usage.sh super-board-throttle.sh super-board-host.sh super-board-pr-body.sh super-review-file-refactor.sh super-qa-file-bug.sh super-board-stop.sh super-board-openrouter-lane.sh super-board-openrouter-balance.sh super-board-deepseek-lane.sh super-board-deepseek-balance.sh super-board-watchdog.sh super-board-guard.sh super-board-autostart.sh super-board-evidence-check.sh super-board-promote.sh super-board-report.py super-board-test-mix.sh; do
   if [ -f "$REPO_ROOT/scripts/$script" ]; then
-    copy_file "$REPO_ROOT/scripts/$script" "$TARGET/.claude/bin/$script"
-    chmod +x "$TARGET/.claude/bin/$script"
+    install_file "$REPO_ROOT/scripts/$script" ".claude/bin/$script" exec
   fi
 done
 
 mkdir -p "$TARGET/.claude/workflows"
 for wf in super-board-wave.js ui-refine-loop.js; do
   if [ -f "$REPO_ROOT/workflows/$wf" ]; then
-    copy_file "$REPO_ROOT/workflows/$wf" "$TARGET/.claude/workflows/$wf"
+    install_file "$REPO_ROOT/workflows/$wf" ".claude/workflows/$wf"
   fi
 done
 echo "   ✓ skills, scripts and workflows → .claude/"
@@ -182,8 +268,7 @@ if [ "$HOOKS" -eq 1 ]; then
   n=0
   for h in "$REPO_ROOT"/hooks/*.py; do
     [ -f "$h" ] || continue
-    copy_file "$h" "$TARGET/.claude/hooks/$(basename "$h")"
-    chmod +x "$TARGET/.claude/hooks/$(basename "$h")"
+    install_file "$h" ".claude/hooks/$(basename "$h")" exec
     n=$((n + 1))
   done
   SNIPPETS="$REPO_ROOT/hooks/settings-snippet.json"
@@ -194,8 +279,7 @@ elif [ "$PROTECT" -eq 1 ]; then
   # --no-hooks --protect-main: the one guard asked for, nothing else. This is the
   # command onboard names when its protect-main question finds no guard script.
   mkdir -p "$TARGET/.claude/hooks"
-  copy_file "$REPO_ROOT/hooks/guard-protected-push.py" "$TARGET/.claude/hooks/guard-protected-push.py"
-  chmod +x "$TARGET/.claude/hooks/guard-protected-push.py"
+  install_file "$REPO_ROOT/hooks/guard-protected-push.py" ".claude/hooks/guard-protected-push.py" exec
   echo "   🛡️  --no-hooks: only the push guard → .claude/settings.json ($(merge_settings "$REPO_ROOT/hooks/settings-protect-main.json"))"
 else
   echo "   ⏭️  guard hooks skipped (--no-hooks)"
@@ -229,6 +313,29 @@ rec = {"from": old.get("from", frm), "to": to, "added_skills": sorted(set(old.ge
 json.dump(rec, open(path, "w"), indent=2)
 PY
   echo "   ⬆️  upgrade from $PREV_VERSION — onboard finishes it (config, labels, columns)"
+fi
+
+# Record what this run installed (and kept). Written last so a kept file keeps
+# its previous pack hash and is still seen as modified on the next reinstall.
+mkdir -p "$MANIFEST_DIR"
+python3 - "$MANIFEST" "$PACK_VERSION" "$NEW_MANIFEST" <<'PY'
+import json, sys, time
+path, version, tsv = sys.argv[1], sys.argv[2], sys.argv[3]
+files = {}
+with open(tsv) as fh:
+    for line in fh:
+        line = line.rstrip("\n")
+        if "\t" in line:
+            rel, sha = line.split("\t", 1)
+            files[rel] = sha
+record = {"version": version, "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+          "files": dict(sorted(files.items()))}
+with open(path, "w") as fh:
+    json.dump(record, fh, indent=2)
+    fh.write("\n")
+PY
+if [ "$KEPT_LOCAL" -gt 0 ]; then
+  echo "   ⚠️  $KEPT_LOCAL local change(s) kept — re-run with --overwrite-local to take the pack version"
 fi
 
 if [ -z "$QUIET" ]; then

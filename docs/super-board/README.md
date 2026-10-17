@@ -70,7 +70,8 @@ card dropped on purpose is closed as not planned and moved to Done with a 🤷 c
 ## Setup notes
 
 - Needs Claude Code, `gh` (authenticated for the board's owner), `jq`, bash 3.2+ and Python 3.
-- Or install from a checkout: `./install.sh [--no-hooks] [--protect-main] /path/to/your-project`.
+- Or install from a checkout: `./install.sh [--no-hooks] [--protect-main] [--overwrite-local] /path/to/your-project`.
+- A reinstall keeps your edits. The installer records the sha256 of every script, workflow and hook in `.claude/super-board/install-manifest.json`; a file that no longer matches it is reported as `kept local change: …` and left alone. Pass `--overwrite-local` to take the pack version — the old file stays as `<path>.local-<timestamp>`.
 - The board is a GitHub Project (v2) with a `Status` field: `Backlog, Ready, Building, QA, Review, Blocked, Done`. `onboard` reuses your best-matching board (adding what is missing, keeping every card) or creates one.
 - Three labels route cards: `qa` skips Building (test what exists), `bug` and `feature` are built first; no label is built too.
 - Default backend is in-session dynamic workflows: turn them on in `/config`. Headless `claude -p` is opt-in (`worker_backend: "claude-p"`).
