@@ -236,5 +236,112 @@ top_card_in_column Review
         self.assertEqual(self.read([{'out': '{}'}]).returncode, 0)
 
 
+    # ── halt classes and auto-resume ─────────────────────────────────────────
+    def test_halt_class_is_recorded_per_failure_kind(self):
+        self.assertEqual(self.read([{'rc': 1}]).returncode, 79)
+        self.assertEqual(json.loads(self.halt.read_text())['class'], 'transient_read')
+        self.halt.unlink()
+        self.assertEqual(self.read([{'rc': 1, 'err': 'Cannot query field wrong'}]).returncode, 79)
+        self.assertEqual(json.loads(self.halt.read_text())['class'], 'permanent_read')
+        self.halt.unlink()
+        self.env['SB_GITHUB_READ_STRICT'] = '1'
+        self.assertEqual(self.read([{'out': '{"unexpected":true}'}], 'state',
+                                   command=['issue', 'view', '1', '--json', 'state']).returncode, 79)
+        self.assertEqual(json.loads(self.halt.read_text())['class'], 'shape')
+        self.halt.unlink()
+        self.env.pop('SB_GITHUB_READ_STRICT')
+        subprocess.run(['python3', str(HELPER), '--halt', 'reconcile the write'],
+                       env=self.env, cwd=self.root, capture_output=True)
+        global_halt = self.root / '.claude/super-board/github-halt.json'
+        self.assertEqual(json.loads(global_halt.read_text())['class'], 'uncertain_write')
+
+    def auto(self, now_value=None, responses=None):
+        env = dict(self.env)
+        if now_value is not None:
+            env['SB_NOW'] = str(now_value)
+        if responses is not None:
+            env['READ_RESPONSES'] = json.dumps(responses)
+        return subprocess.run(['python3', str(HELPER), '--auto-resume'],
+                              env=env, text=True, capture_output=True, cwd=self.root)
+
+    def test_auto_resume_skips_every_class_but_transient(self):
+        self.read([{'rc': 1, 'err': 'Cannot query field wrong'}])
+        before, calls = self.halt.read_text(), self.log.read_text()
+        result = self.auto()
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(json.loads(result.stdout)['action'], 'skip')
+        self.assertEqual(self.halt.read_text(), before, 'a non-transient halt must not change')
+        self.assertEqual(self.log.read_text(), calls, 'no probe on a non-transient halt')
+
+    def test_auto_resume_clears_a_recovered_transient_read(self):
+        self.assertEqual(self.read([{'rc': 1}]).returncode, 79)
+        quota = {'resources': {'graphql': {'remaining': 5000, 'reset': 0},
+                               'core': {'remaining': 5000, 'reset': 0}}}
+        result = self.auto(responses=[{'out': json.dumps(quota)}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['action'], 'resumed')
+        self.assertFalse(self.halt.exists(), 'a cleared halt must be archived')
+        self.assertEqual(len(list(self.root.glob('github-halt-*.json'))), 1)
+
+    def test_auto_resume_backoff_honours_sb_now(self):
+        self.read([{'rc': 1}])
+        start = 1_000_000
+        first = self.auto(now_value=start)
+        self.assertEqual(first.returncode, 0, first.stderr)
+        payload = json.loads(first.stdout)
+        self.assertEqual(payload['action'], 'wait')
+        self.assertEqual(payload['next_probe_at'], start + 120, 'first wait is 2 minutes')
+        calls = self.log.read_text()
+        early = self.auto(now_value=start + 119)
+        self.assertEqual(json.loads(early.stdout)['action'], 'wait')
+        self.assertEqual(self.log.read_text(), calls, 'no probe before next_probe_at')
+        due = self.auto(now_value=start + 120)
+        self.assertNotEqual(self.log.read_text(), calls, 'probe once the wait has elapsed')
+        self.assertEqual(json.loads(due.stdout)['next_probe_at'], start + 120 + 300, 'second wait is 5 minutes')
+
+    def test_auto_resume_stops_after_six_failures_with_one_attention_line(self):
+        self.read([{'rc': 1}])
+        attention = self.root / 'needs-attention.log'
+        stamp = 2_000_000
+        for attempt in range(5):
+            step = self.auto(now_value=stamp)
+            self.assertEqual(step.returncode, 0, (attempt, step.stdout, step.stderr))
+            stamp = json.loads(step.stdout)['next_probe_at']
+        last = self.auto(now_value=stamp)
+        self.assertEqual(last.returncode, 4)
+        self.assertEqual(json.loads(last.stdout)['action'], 'stop')
+        self.assertTrue(self.halt.exists(), 'the evidence stays for reconciliation')
+        self.assertEqual(len(attention.read_text().splitlines()), 1)
+        again = self.auto(now_value=stamp + 86_400)
+        self.assertEqual(again.returncode, 4)
+        self.assertEqual(len(attention.read_text().splitlines()), 1, 'only one attention line')
+
+
+    def test_runner_auto_resume_waits_and_stops_on_a_human_halt(self):
+        script = ('SB_LIB_ONLY=1 . "$1"\nset +e\nlog() { :; }\n'
+                  'auto_resume_halt; echo "rc=$? wait=$AUTO_RESUME_WAIT"\n')
+
+        def call(now_value):
+            return subprocess.run(['bash', '-c', script, 'test',
+                                   str(ROOT / 'scripts/super-board-run.sh')],
+                                  cwd=self.root, env=dict(self.env, SB_NOW=str(now_value)),
+                                  text=True, capture_output=True)
+
+        idle = call(1_000_000)
+        self.assertEqual(idle.returncode, 0, idle.stderr)
+        self.assertIn('rc=0 wait=0', idle.stdout, 'no halt file means carry on')
+
+        self.read([{'rc': 1}])
+        waiting = call(1_000_000)
+        self.assertEqual(waiting.returncode, 0, waiting.stderr)
+        self.assertIn('rc=1 wait=120', waiting.stdout, 'the tick sleeps to the first probe')
+
+        self.halt.unlink()
+        self.read([{'rc': 1, 'err': 'Cannot query field wrong'}])
+        stopping = call(1_000_000)
+        self.assertEqual(stopping.returncode, 79, stopping.stdout)
+        self.assertNotIn('rc=', stopping.stdout, 'a human-classed halt stops the run')
+
+
 if __name__ == '__main__':
     unittest.main()

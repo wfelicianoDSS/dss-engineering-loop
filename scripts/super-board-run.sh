@@ -925,6 +925,35 @@ REAP_COUNT=0
 LANDED_COUNT=0
 DISPATCH_LOG=""
 
+# Read-halt auto-resume. Runs before gh_checkpoint, which exits on any halt file.
+# Only a transient_read halt may clear itself; a human-classed halt stops the run
+# so the orchestrator can reconcile it. The backoff schedule lives in the read
+# helper, so this only reports the wait. Returns 0 = carry on, 1 = halted with a
+# wait in AUTO_RESUME_WAIT (the caller sleeps and restarts the tick); exits 79
+# when the halt needs a human.
+AUTO_RESUME_WAIT=0
+auto_resume_halt() {
+  AUTO_RESUME_WAIT=0
+  [ -f "$SB_GLOBAL_HALT_FILE" ] || return 0
+  local rc=0 out action at
+  out=$(SB_GITHUB_HALT_FILE="$SB_GLOBAL_HALT_FILE" python3 "$SB_GITHUB_READ" --auto-resume 2>/dev/null) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    action=$(printf '%s' "$out" | jq -r '.class // "unknown"' 2>/dev/null || echo unknown)
+    log "🛑 GitHub read halt needs a human (class=${action}) — stopping"
+    exit 79
+  fi
+  if [ "$(printf '%s' "$out" | jq -r '.action // "none"' 2>/dev/null || echo none)" = "wait" ]; then
+    at=$(printf '%s' "$out" | jq -r '.next_probe_at // 0' 2>/dev/null || echo 0)
+    clock="${SB_NOW:-$(date +%s)}"
+    AUTO_RESUME_WAIT=$(( ${at:-0} - clock ))
+    [ "$AUTO_RESUME_WAIT" -gt 0 ] || AUTO_RESUME_WAIT=1
+    log "⏸ GitHub read halt is transient — auto-resume in ${AUTO_RESUME_WAIT}s"
+    return 1
+  fi
+  log "✅ GitHub read halt cleared by auto-resume — continuing"
+  return 0
+}
+
 # Sourced by the gate tests (`SB_LIB_ONLY=1 . scripts/super-board-run.sh`) to exercise
 # the helpers above without starting a run. Executing the script normally is unaffected.
 if [ "${SB_LIB_ONLY:-0}" = "1" ]; then
@@ -1007,6 +1036,12 @@ REVIEW_PID=""; REVIEW_ISSUE=""
 GROOM_PID=""; GROOM_PROVIDER=""
 
 while true; do
+  # ── Read-halt auto-resume, before gh_checkpoint (which exits on any halt file).
+  #    A transient read failure may clear itself; anything else stops the run.
+  if ! auto_resume_halt; then
+    sleep "$AUTO_RESUME_WAIT"
+    continue
+  fi
   gh_checkpoint
   # Workflow-backend mutual exclusion, re-checked every tick: the startup
   # check alone leaves a TOCTOU window where a workflow run starting at the
