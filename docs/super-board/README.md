@@ -347,3 +347,4 @@ control plane and the provider budget, and it never does product work.
 - [Field notes](field-notes.md) — concrete production failures met while operating a board
   (migrations, provider exhaustion, grooming cost, paginated reads, keyword false positives,
   stale locks) with cause and fix.
+- [Runner configuration](runner-config.md) — the keys the headless runner reads, with defaults.
