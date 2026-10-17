@@ -63,3 +63,20 @@ current: every recurring failure here is a fix that should reach the scripts or 
 - **A watchdog that dispatches a Codex/Claude "fix agent" spends worker quota on board plumbing.**
   If board fixes must stay personal, disable the LLM fixer and escalate to the orchestrator
   instead.
+
+## Runner fixes validated on FieldOps (headless dispatcher)
+
+Implemented and verified in a live headless run. The workflow-based pack has no equivalent, so
+these live in the runner rather than here.
+
+- **No-provider visibility.** When a lane cannot get a provider, the runner writes a throttled
+  entry (once per 30 min) to `.claude/super-board/needs-attention.log` — a frozen pipeline is no
+  longer visible only in the run log.
+- **Pause TTL 5h → 30m.** A vendor-limit pause clears after 30 minutes, so a recovered provider
+  returns promptly. Still keep at least one provider live.
+- **Per-tick stale-lock reap.** Dead `inflight/<issue>` locks are swept every tick, not only at
+  startup, so a restart-stranded QA/Review card recovers without a manual unlock.
+- **Restart guard.** The runner refuses to start while an orphaned
+  `claude -p … super-board run` worker exists; stop orphans first
+  (`pkill -f 'claude -p .*super-board run'`), otherwise the new runner exits and only the guard
+  remains.
