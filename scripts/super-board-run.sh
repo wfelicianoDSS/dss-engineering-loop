@@ -176,6 +176,45 @@ groom_due() { # $1=signature $2=last signature $3=last epoch $4=now epoch
   [ "${1:-}" != "${2:-}" ] && return 0
   [ $(( ${4:-0} - ${3:-0} )) -ge "${GROOM_COOLDOWN:-1800}" ]
 }
+# Pure review-reuse policy: a finished review of the current head must not be repeated.
+# merged → Done (never merge twice); approve + same head → merge only; otherwise review.
+review_decision() { # $1=mergedAt $2=headRefOid $3=mergeCommit $4=verdict $5=reviewed-head
+  if [ -n "${1:-}" ] && [ "${1:-}" != "null" ] && [ -n "${3:-}" ] && [ "${3:-}" != "null" ]; then
+    echo done; return 0
+  fi
+  if [ "${4:-}" = "approve" ] && [ -n "${5:-}" ] && [ "${5:-}" = "${2:-}" ]; then
+    echo merge; return 0
+  fi
+  echo review
+}
+
+# Read the card's PR and its latest verdict lines; sets REVIEW_MODE/REVIEW_HEAD/REVIEW_PR.
+# A missing PR or unreadable comments falls back to a full review (the safe branch).
+review_reuse() { # $1=issue
+  local issue="$1" list pr number comments verdict reviewed merged mc head
+  REVIEW_MODE=review; REVIEW_HEAD=""; REVIEW_PR=""
+  REVIEW_MERGED=""; REVIEW_MERGE_COMMIT=""
+  list=$(gh pr list --state all --limit 50 \
+          --json number,state,headRefOid,mergedAt,mergeCommit,body 2>/dev/null) || return 0
+  pr=$(printf '%s' "$list" | jq -c --argjson n "$issue" '
+    map(select((.body // "") | test("(?i)(closes|fixes|resolves):?[[:space:]]*#?" + ($n|tostring) + "([^0-9]|$)")))
+    | first // empty' 2>/dev/null) || true
+  [ -n "$pr" ] || return 0
+  number=$(printf '%s' "$pr" | jq -r '.number')
+  merged=$(printf '%s' "$pr" | jq -r '.mergedAt // ""')
+  mc=$(printf '%s' "$pr" | jq -r '.mergeCommit.oid // ""')
+  head=$(printf '%s' "$pr" | jq -r '.headRefOid // ""')
+  comments=$(gh pr view "$number" --json comments -q '.comments' 2>/dev/null) || comments='[]'
+  verdict=$(printf '%s' "$comments" | jq -r '[.[] | (.body // "") | split("\n")[]
+            | select(test("(?i)^[ \t]*review-verdict:"))] | last // ""' 2>/dev/null \
+            | sed -E 's/^[^:]*:[[:space:]]*//' | tr '[:upper:]' '[:lower:]')
+  reviewed=$(printf '%s' "$comments" | jq -r '[.[] | (.body // "") | split("\n")[]
+             | select(test("(?i)^[ \t]*reviewed-head:"))] | last // ""' 2>/dev/null \
+             | sed -E 's/^[^:]*:[[:space:]]*//')
+  REVIEW_MODE=$(review_decision "$merged" "$head" "$mc" "$verdict" "$reviewed")
+  REVIEW_HEAD="$reviewed"; REVIEW_PR="$number"; REVIEW_MERGED="$merged"; REVIEW_MERGE_COMMIT="$mc"
+}
+
 # Board checkout root: Review reads policy (skill, run.md, gate) from HERE, never the card
 # worktree, so a policy change reaches in-flight cards (2026-10-15 review-loop lesson).
 : "${BOARD_ROOT:=$(pwd)}"
@@ -462,13 +501,41 @@ dispatch_lane() {
     log "skip dispatch lane=${lane} issue=#${issue} — issue is CLOSED"
     return 1
   fi
+  # A finished review of the current head is reusable. If the PR is already merged,
+  # reconcile the card to Done without dispatching or merging again (PR 7).
+  REVIEW_MODE=review; REVIEW_HEAD=""; REVIEW_PR=""
+  if [ "$lane" = "review" ]; then
+    review_reuse "$issue"
+    if [ "$REVIEW_MODE" = "done" ]; then
+      if [ -n "${REVIEW_MERGE_COMMIT:-}" ] \
+         && git merge-base --is-ancestor "$REVIEW_MERGE_COMMIT" "origin/$BASE_BRANCH" 2>/dev/null; then
+        local done_item
+        done_item=$(echo "$PROJECT_ITEMS_JSON" | jq -r --argjson n "$issue" '.items[]|select(.content.number==$n)|.id' | head -1)
+        if [ -n "$done_item" ] && set_card_status "$done_item" Done; then
+          gh_checkpoint
+          [ -n "$BOT_LOGIN" ] && gh_write_once issue edit "$issue" --remove-assignee "$BOT_LOGIN" >/dev/null 2>&1 || true
+          gh_write_once issue comment "$issue" --body "[orchestrator] [report] merged
+Did: verified PR #${REVIEW_PR} merge commit ${REVIEW_MERGE_COMMIT} is an ancestor of origin/${BASE_BRANCH}
+✅ Done: moved Review → Done; no second merge attempt" >/dev/null 2>&1 || true
+          log "review #${issue}: PR #${REVIEW_PR} already merged (${REVIEW_MERGE_COMMIT}) → Done; no merge attempt"
+          return 0
+        fi
+      fi
+      REVIEW_MODE=review
+    fi
+  fi
   if ! try_claim_assignee "$issue"; then
     return 1
   fi
   case "$lane" in
     build|build2) prompt="Run super-build on issue #${issue} for super-board run. Read .claude/skills/super-board/references/run.md → Builder lifecycle. Config: ${CONFIG_PATH}." ;;
     qa)     prompt="Run super-qa on issue #${issue} for super-board run. Read .claude/skills/super-board/references/run.md → Tester lifecycle. Config: ${CONFIG_PATH}." ;;
-    review) prompt="Run super-review on issue #${issue} for super-board run. This worktree is the CARD BRANCH — read POLICY from the board checkout instead, so a policy change reaches this card: ${BOARD_ROOT}/.claude/skills/super-review/SKILL.md, ${BOARD_ROOT}/.claude/skills/super-board/references/run.md → Reviewer lifecycle, and ${BOARD_ROOT}/.claude/skills/super-board/references/security-gate.md. Run the merge gate as ${BOARD_ROOT}/.claude/bin/super-board-merge-gate.sh --config ${BOARD_ROOT}/.claude/super-board/configs/${CONFIG_SLUG}.json. Review the diff in this worktree; do not read policy from it." ;;
+    review)
+      if [ "$REVIEW_MODE" = "merge" ]; then
+        prompt="Run the merge-only pass for issue #${issue} for super-board run. A previous review approved head ${REVIEW_HEAD}; do NOT re-review and do not change the branch. Run ${BOARD_ROOT}/.claude/bin/super-board-merge-gate.sh --config ${BOARD_ROOT}/.claude/super-board/configs/${CONFIG_SLUG}.json --expect-head ${REVIEW_HEAD}. Read ${BOARD_ROOT}/.claude/skills/super-board/references/run.md → Reviewer lifecycle only for merge/handoff rules. This worktree is the CARD BRANCH; do not read policy from it."
+      else
+        prompt="Run super-review on issue #${issue} for super-board run. This worktree is the CARD BRANCH — read POLICY from the board checkout instead, so a policy change reaches this card: ${BOARD_ROOT}/.claude/skills/super-review/SKILL.md, ${BOARD_ROOT}/.claude/skills/super-board/references/run.md → Reviewer lifecycle, and ${BOARD_ROOT}/.claude/skills/super-board/references/security-gate.md. Run the merge gate as ${BOARD_ROOT}/.claude/bin/super-board-merge-gate.sh --config ${BOARD_ROOT}/.claude/super-board/configs/${CONFIG_SLUG}.json. Review the diff in this worktree; do not read policy from it."
+      fi ;;
     *) log "unknown lane: $lane"; return 1 ;;
   esac
   # Review runs in its own worktree, never the host checkout (see review_worktree).

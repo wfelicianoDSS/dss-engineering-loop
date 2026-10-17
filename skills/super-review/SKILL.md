@@ -162,6 +162,11 @@ Next: <builder | qa | Eric | none>
 - Deepening opportunities filed with `super-review-file-refactor.sh` get a row with Status
   `filed #<issue>`.
 - Human gates: the header says `🙋 human-gated` and `Next: Eric`; the decision goes in a row.
+- **Machine verdict.** End every report with two lines the runner reads (they let an
+  approved, unchanged head go straight to a merge-only pass instead of a full re-review):
+  `review-verdict: approve|bounce|block` and `reviewed-head: <full 40-char PR head sha>`.
+  `approve` only with a `✅ merge-ready` header; `reviewed-head` is the head you actually
+  verified. A missing pair is treated as "review again", which is the safe branch.
 
 For short summaries (wave reports), keep it phone-friendly:
 
