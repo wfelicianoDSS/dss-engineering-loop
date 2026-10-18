@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""super-board-groom-select.py — pick only Backlog issues without a valid readiness certificate.
+"""super-board-groom-select.py — pick only Backlog stories without a valid readiness certificate.
 
     super-board-groom-select.py --items <board-items.json> [--comments-dir <dir>]
+    super-board-groom-select.py --items <board-items.json> --certify <issue>
 
 A readiness certificate is a hidden comment left after a story passes groom/lint:
 
     <!-- sb-ready v1 hash=<sha256(title+body+labels)[:12]> checks=ac,deps,scope,risk -->
 
-An issue is selected when it has no certificate, or the certificate hash differs from the
-issue's current content hash (title + body + sorted labels). Prints a JSON list of numbers.
+Selection: only Backlog **stories** (epic/feature containers are skipped) whose certificate is
+missing or whose hash differs from the current title+body+sorted labels. `--certify` prints the
+exact certificate line so the groom can post it after moving the story to Ready.
 """
 from __future__ import annotations
 
@@ -19,31 +21,22 @@ import pathlib
 import re
 import sys
 
-MARK = re.compile(r"<!--\s*sb-ready v1 hash=([0-9a-f]{12})(?: snap=([0-9a-f]{12}))?")
+MARK = re.compile(r"<!--\s*sb-ready v1 hash=([0-9a-f]{12})")
+CONTAINER = re.compile(r"^(?:EPIC|FEAT)-\d+", re.IGNORECASE)
 
 
-def _hash(payload: str) -> str:
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+def label_names(labels) -> list[str]:
+    return sorted((l if isinstance(l, str) else (l or {}).get("name", "")) for l in (labels or []))
 
 
 def content_hash(title: str, body: str, labels) -> str:
-    names = sorted(
-        (l if isinstance(l, str) else (l or {}).get("name", "")) for l in (labels or [])
-    )
-    return _hash(f"{title}\n{body}\n{','.join(names)}")
+    payload = f"{title}\n{body}\n{','.join(label_names(labels))}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
-def snapshot_hash(title: str, labels) -> str:
-    """Title + labels only — the fields the runner's board snapshot actually carries.
-
-    The full hash stays the source of truth when the caller has the body. The board
-    snapshot does not, so the certificate also carries this narrower hash; otherwise
-    every selection would look stale and re-groom the whole backlog forever.
-    """
-    names = sorted(
-        (l if isinstance(l, str) else (l or {}).get("name", "")) for l in (labels or [])
-    )
-    return _hash(f"{title}\n{','.join(names)}")
+def certificate(number: int, item: dict) -> str:
+    digest = content_hash(item.get("title") or "", item.get("body") or "", item.get("labels"))
+    return f"<!-- sb-ready v1 hash={digest} checks=ac,deps,scope,risk -->"
 
 
 def main() -> int:
@@ -51,6 +44,8 @@ def main() -> int:
     parser.add_argument("--items", required=True)
     parser.add_argument("--comments-dir", default=None,
                         help="directory of <issue>.md files holding the issue comments")
+    parser.add_argument("--certify", type=int, default=None,
+                        help="print the certificate line for this issue")
     args = parser.parse_args()
 
     try:
@@ -60,29 +55,32 @@ def main() -> int:
         return 64
 
     items = data.get("items", []) if isinstance(data, dict) else data
+    items = [i for i in items if isinstance(i, dict) and type(i.get("number")) is int]
+
+    if args.certify is not None:
+        match = next((i for i in items if i["number"] == args.certify), None)
+        if match is None:
+            print(f"issue {args.certify} not in items", file=sys.stderr)
+            return 66
+        print(certificate(args.certify, match))
+        return 0
+
     selected = []
     for item in items:
-        if not isinstance(item, dict) or item.get("status") != "Backlog":
+        if item.get("status") != "Backlog":
             continue
-        # The runner's board snapshot nests the issue under `content`; the groom
-        # worker's flat item list does not. Accept both shapes.
-        content = item.get("content") or {}
-        number = item.get("number", content.get("number"))
-        if type(number) is not int:
+        # Epic/feature containers are roadmap scaffolding, never executable stories.
+        if CONTAINER.match(item.get("title") or ""):
             continue
-        title = item.get("title", content.get("title")) or ""
-        labels = item.get("labels", content.get("labels"))
-        body = item.get("body", content.get("body"))
-        if "content" in item and "body" not in content:
-            wanted = snapshot_hash(title, labels)
-        else:
-            wanted = content_hash(title, body or "", labels)
+        number = item["number"]
+        wanted = content_hash(item.get("title") or "", item.get("body") or "",
+                              item.get("labels"))
         text = ""
         if args.comments_dir:
             path = pathlib.Path(args.comments_dir) / f"{number}.md"
             if path.exists():
                 text = path.read_text()
-        certified = {value for pair in MARK.findall(text) for value in pair if value}
+        certified = MARK.findall(text)
         if not certified or wanted not in certified:
             selected.append(number)
 

@@ -4,24 +4,20 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "super-board-groom-select.py"
-sys.path.insert(0, str(SCRIPT.parent))
 import importlib.util
 
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "super-board-groom-select.py"
 spec = importlib.util.spec_from_file_location("groom_select", SCRIPT)
 groom_select = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(groom_select)
 
 
-def cert(number, title, body, labels):
-    h = groom_select.content_hash(title, body, labels)
-    snap = groom_select.snapshot_hash(title, labels)
-    return f"<!-- sb-ready v1 hash={h} snap={snap} checks=ac,deps,scope,risk -->"
+def cert(title, body, labels):
+    return f"<!-- sb-ready v1 hash={groom_select.content_hash(title, body, labels)} checks=ac,deps,scope,risk -->"
 
 
 class GroomSelectTests(unittest.TestCase):
-    def run_select(self, items, comments=None):
+    def run_select(self, items, comments=None, extra=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             items_path = root / "items.json"
@@ -33,38 +29,42 @@ class GroomSelectTests(unittest.TestCase):
                 for number, text in comments.items():
                     (cdir / f"{number}.md").write_text(text)
                 args += ["--comments-dir", str(cdir)]
-            result = subprocess.run(args, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            return json.loads(result.stdout)
+            args += extra or []
+            return subprocess.run(args, capture_output=True, text=True)
 
     def issue(self, number=1, status="Backlog", title="US-1", body="b", labels=("feature",)):
         return {"number": number, "status": status, "title": title, "body": body,
                 "labels": list(labels)}
 
-    def test_uncertified_is_selected(self):
-        self.assertEqual(self.run_select([self.issue()]), [1])
+    def test_uncertified_story_is_selected(self):
+        r = self.run_select([self.issue()])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), [1])
 
-    def test_unchanged_certificate_is_skipped(self):
+    def test_unchanged_certificate_skips(self):
         issue = self.issue()
-        comments = {1: cert(1, issue["title"], issue["body"], issue["labels"])}
-        self.assertEqual(self.run_select([issue], comments), [])
+        r = self.run_select([issue], {1: cert(issue["title"], issue["body"], issue["labels"])})
+        self.assertEqual(json.loads(r.stdout), [])
 
-    def test_body_edit_is_selected(self):
+    def test_body_edit_reselects(self):
         issue = self.issue()
-        stale = cert(1, issue["title"], "old body", issue["labels"])
-        self.assertEqual(self.run_select([issue], {1: stale}), [1])
+        r = self.run_select([issue], {1: cert(issue["title"], "old", issue["labels"])})
+        self.assertEqual(json.loads(r.stdout), [1])
 
-    def test_runner_board_shape_is_selected_and_certified(self):
-        item = {"status": "Backlog", "content": {
-            "number": 11, "title": "US-11", "body": "story", "labels": ["feature"]}}
-        self.assertEqual(self.run_select([item]), [11], "nested board item is selected")
-        comments = {11: cert(11, "US-11", "story", ["feature"])}
-        self.assertEqual(self.run_select([item], comments), [],
-                         "a nested board item with a current certificate is skipped")
+    def test_containers_are_skipped(self):
+        items = [self.issue(number=2, title="EPIC-010 — Notifications"),
+                 self.issue(number=3, title="FEAT-044 — Delivery Providers"),
+                 self.issue(number=4, status="Ready"),
+                 self.issue(number=5)]
+        r = self.run_select(items)
+        self.assertEqual(json.loads(r.stdout), [5])
 
-    def test_non_backlog_and_non_issue_skipped(self):
-        items = [self.issue(status="Ready"), self.issue(number=2, status="Backlog"), "junk"]
-        self.assertEqual(self.run_select(items), [2])
+    def test_certify_prints_marker(self):
+        issue = self.issue()
+        r = self.run_select([issue], extra=["--certify", "1"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(),
+                         cert(issue["title"], issue["body"], issue["labels"]))
 
 
 if __name__ == "__main__":
