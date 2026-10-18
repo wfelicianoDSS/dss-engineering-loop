@@ -274,15 +274,20 @@ def validate(text, kind, meta=None, requested=None):
                 require(type(content.get('number')) is int and content['number'] > 0, 'board issue number missing')
     elif kind == 'issues':
         require(isinstance(value, list) and bool(value), 'dependency pages missing')
-        # Two shapes reach this kind: a GraphQL dependency read (a list of
-        # `data.repository.issues` page objects) and a REST `--paginate --slurp`
-        # read (a list of pages, each a list of issues). Validate whichever arrived,
-        # so a REST list never raises a raw TypeError and halts the run.
+        # Three shapes reach this kind: a GraphQL dependency read (a list of
+        # `data.repository.issues` page objects), a REST `--paginate --slurp`
+        # read (a list of pages, each a list of issues), and a plain
+        # `gh issue list --json …` flat list. Validate whichever arrived, so a
+        # caller's REST-shaped list never raises a raw KeyError and halts the run.
         if isinstance(value[0], list):
             require(all(isinstance(page, list) for page in value), 'dependency pages malformed')
             entries = [entry for page in value for entry in page]
             require(all(isinstance(e, dict) and type(e.get('number')) is int and e['number'] > 0
                         for e in entries), 'dependency issue fields missing')
+            return
+        if isinstance(value[0], dict) and 'number' in value[0]:
+            require(all(isinstance(e, dict) and type(e.get('number')) is int and e['number'] > 0
+                        for e in value), 'dependency issue fields missing')
             return
         seen = set()
         for index, page in enumerate(value):

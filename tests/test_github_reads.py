@@ -323,6 +323,18 @@ top_card_in_column Review
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout), pages)
 
+    def test_flat_issue_list_validates(self):
+        # `gh issue list --json number,title` is a flat REST list, not pages.
+        flat = [{'number': 1, 'title': 'one'}, {'number': 2, 'title': 'two'}]
+        r = self.read([{'out': json.dumps(flat)}], 'issues')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), flat)
+
+    def test_malformed_flat_issue_list_halts(self):
+        r = self.read([{'out': json.dumps([{'number': 1}, {'title': 'two'}])}], 'issues')
+        self.assertEqual(r.returncode, 79)
+        self.assertEqual(self.log.read_text(), '3')
+
     def test_malformed_rest_slurped_page_halts(self):
         pages = [[{'number': 1}], [{'number': 'two'}]]
         r = self.read([{'out': json.dumps(pages)}], 'issues')
