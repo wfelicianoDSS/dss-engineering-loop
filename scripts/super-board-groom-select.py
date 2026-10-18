@@ -54,8 +54,23 @@ def main() -> int:
         print(f"unreadable items: {error}", file=sys.stderr)
         return 64
 
-    items = data.get("items", []) if isinstance(data, dict) else data
-    items = [i for i in items if isinstance(i, dict) and type(i.get("number")) is int]
+    raw_items = data.get("items", []) if isinstance(data, dict) else data
+    # Board items carry number/title under `content`; normalize both shapes.
+    items = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        content = raw.get("content") if isinstance(raw.get("content"), dict) else {}
+        number = raw.get("number", content.get("number"))
+        if type(number) is not int:
+            continue
+        items.append({
+            "number": number,
+            "title": raw.get("title") or content.get("title") or "",
+            "body": raw.get("body") or "",
+            "labels": raw.get("labels") or [],
+            "status": raw.get("status"),
+        })
 
     if args.certify is not None:
         match = next((i for i in items if i["number"] == args.certify), None)
